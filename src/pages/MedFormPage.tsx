@@ -25,6 +25,7 @@ export default function MedFormPage() {
   const [loading, setLoading] = useState(isEdit);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [scanInfo, setScanInfo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [nameSuggestions, setNameSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -103,6 +104,7 @@ export default function MedFormPage() {
 
     setScanning(true);
     setScanError(null);
+    setScanInfo(null);
     try {
       const ocrResult = await recognizeLabelText(file);
       const parsed = parseLabelText(ocrResult);
@@ -111,12 +113,12 @@ export default function MedFormPage() {
         const known = await rxLookupStore.get(parsed.rxNumber);
         if (known) {
           // We've seen this Rx# before (likely a refill) — trust the saved
-          // details over a fresh OCR guess.
+          // details over a fresh OCR guess at the name.
           setForm((prev) => ({
             ...prev,
             rxNumber: known.rxNumber,
-            name: prev.name || known.name,
-            brandOrCommonName: prev.brandOrCommonName || known.brandOrCommonName || '',
+            name: known.name,
+            brandOrCommonName: known.brandOrCommonName || '',
             amount: prev.amount || known.amount,
             frequency: prev.frequency || known.frequency,
             notes: prev.notes || known.notes || '',
@@ -125,17 +127,22 @@ export default function MedFormPage() {
         }
       }
 
-      if (!parsed.name && !parsed.amount && !parsed.frequency && !parsed.rxNumber) {
+      if (!parsed.amount && !parsed.frequency && !parsed.rxNumber) {
         setScanError("Couldn't make out the label clearly. Try a closer, well-lit photo, or enter details manually.");
         return;
       }
       setForm((prev) => ({
         ...prev,
         rxNumber: prev.rxNumber || parsed.rxNumber || prev.rxNumber,
-        name: prev.name || parsed.name || prev.name,
         amount: prev.amount || parsed.amount || prev.amount,
         frequency: prev.frequency || parsed.frequency || prev.frequency,
       }));
+      // The drug name isn't reliably readable off the label (patient name
+      // usually dominates the OCR), so this is a new Rx# we haven't seen —
+      // ask once, then it's remembered for every future refill.
+      if (parsed.rxNumber) {
+        setScanInfo("New prescription scanned — enter the medication name once below and we'll remember it for refills.");
+      }
     } catch {
       setScanError('Scan failed. Try again or enter details manually.');
     } finally {
@@ -204,6 +211,7 @@ export default function MedFormPage() {
           {scanning ? 'Reading label…' : '📷 Scan a label or upload a photo'}
         </button>
         {scanError && <p className="login-error">{scanError}</p>}
+        {scanInfo && <p className="login-info">{scanInfo}</p>}
       </div>
 
       <form className="med-form" onSubmit={handleSubmit}>

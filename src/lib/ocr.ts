@@ -22,47 +22,16 @@ export async function recognizeLabelText(image: Blob): Promise<OcrResult> {
   return { text: result.data.text, lines };
 }
 
-const STOPWORDS = [
-  'pharmacy',
-  'rx',
-  'refill',
-  'refills',
-  'qty',
-  'quantity',
-  'discard',
-  'after',
-  'doctor',
-  'dr',
-  'prescriber',
-  'patient',
-  'date',
-  'ndc',
-  'mfg',
-  'lot',
-  'exp',
-  'expires',
-  'store',
-  'tablet',
-  'tablets',
-  'capsule',
-  'capsules',
-  'warning',
-  'caution',
-  'pharmacist',
-  'generic',
-  'for',
-  'street',
-  'ave',
-  'blvd',
-];
-
 const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
 
 // Pharmacy labels print the Rx/prescription number in formats like
-// "Rx# 1234567", "RX: 1234567", "Rx No. 1234567" — it's printed cleanly and
-// consistently across refills, making it a far more reliable identifier
-// than guessing the drug name from font size each scan.
-const RX_NUMBER_PATTERN = /\bRx\.?\s*(?:#|No\.?|number)?\s*[:#]?\s*(\d{5,9})\b/i;
+// "Rx# 1234567", "RX: 1234567", "Rx No. 1234567", "Prescription #1234567"
+// — it's printed cleanly and consistently across refills (the same Rx#
+// reprints on every refill of the same prescription), which makes it a far
+// more reliable identifier than guessing the drug name off the label, where
+// the patient's own name is often the largest, highest-confidence text and
+// gets mistaken for the drug name.
+const RX_NUMBER_PATTERN = /\b(?:Rx|Prescription)\.?\s*(?:#|No\.?|number)?\s*[:#]?\s*(\d{5,10})\b/i;
 
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
 const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -82,48 +51,17 @@ const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /as\s+needed|p\.?r\.?n\.?\b/i, label: 'As needed' },
 ];
 
-function cleanWord(text: string): string {
-  return text
-    .replace(/\s{2,}/g, ' ')
-    .replace(/[^a-zA-Z0-9\s'-]/g, '')
-    .trim();
-}
-
-function isPlausibleName(text: string): boolean {
-  if (text.length < 3 || text.length > 40) return false;
-  const lower = text.toLowerCase();
-  if (STOPWORDS.some((w) => new RegExp(`\\b${w}\\b`).test(lower))) return false;
-  if (DOSE_PATTERN.test(text)) return false;
-  if (/^\d+$/.test(text)) return false;
-  if (!/[a-zA-Z]{3,}/.test(text)) return false;
-  // Sig lines ("TAKE ONE TABLET BY MOUTH...") are instructions, not the drug name.
-  if (/^(take|use|apply|inject|instill)\b/i.test(text)) return false;
-  return true;
-}
-
 /**
- * Picks the most likely drug name by scoring each candidate line on font
- * size (bigger text on a label is usually the drug name) and OCR
- * confidence, rather than just taking the first plausible line.
+ * Pulls the Rx# and the patterns we can match reliably (dose, frequency)
+ * straight out of the label text. We deliberately do NOT guess the drug
+ * name from font size/line position anymore — on real pharmacy labels the
+ * patient's own name is often the largest, highest-confidence line, which
+ * made that heuristic confidently wrong. The Rx# is the one thing printed
+ * consistently across refills, so it's the only reliable identifier; the
+ * caller looks it up against previously-saved medications to fill in the
+ * name, and otherwise leaves the name for the person to type once.
  */
-function pickNameLine(lines: OcrLine[]): string | null {
-  const candidates = lines
-    .map((l) => ({ ...l, text: cleanWord(l.text) }))
-    .filter((l) => isPlausibleName(l.text) && l.confidence >= 40);
-
-  if (candidates.length === 0) return null;
-
-  const maxHeight = Math.max(...candidates.map((l) => l.height));
-  const scored = candidates.map((l) => ({
-    line: l,
-    score: l.height / maxHeight + l.confidence / 100,
-  }));
-
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0].line.text;
-}
-
-export function parseLabelText({ text, lines }: OcrResult): Partial<MedicationInput> & { rxNumber?: string } {
+export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> & { rxNumber?: string } {
   const result: Partial<MedicationInput> & { rxNumber?: string } = {};
 
   const rxMatch = text.match(RX_NUMBER_PATTERN);
@@ -146,11 +84,6 @@ export function parseLabelText({ text, lines }: OcrResult): Partial<MedicationIn
       }
       break;
     }
-  }
-
-  const name = pickNameLine(lines);
-  if (name) {
-    result.name = name;
   }
 
   return result;
