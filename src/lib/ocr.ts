@@ -1,25 +1,102 @@
 import { recognize } from 'tesseract.js';
 import type { MedicationInput } from './types';
 
-export interface OcrLine {
-  text: string;
-  confidence: number;
-  height: number;
-}
-
 export interface OcrResult {
   text: string;
-  lines: OcrLine[];
+}
+
+function loadImage(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(blob);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Failed to load image'));
+    };
+    img.src = url;
+  });
+}
+
+// Pharmacies almost universally highlight the Rx# on the sticker in
+// highlighter yellow: strong red+green, much weaker blue, and not washed
+// out toward white or gray.
+function isHighlightYellow(r: number, g: number, b: number): boolean {
+  return r > 170 && g > 150 && b < 150 && r - b > 40 && g - b > 30;
+}
+
+/**
+ * Scans the photo for a highlighter-yellow patch and crops + upscales just
+ * that region. Running OCR on this tight, enlarged crop instead of the
+ * whole label dramatically improves Rx# read accuracy, since that's where
+ * pharmacies mark the one number that's reliable across refills.
+ */
+async function cropToHighlight(blob: Blob): Promise<Blob | null> {
+  const img = await loadImage(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx || canvas.width === 0 || canvas.height === 0) return null;
+  ctx.drawImage(img, 0, 0);
+
+  const { width, height } = canvas;
+  const { data } = ctx.getImageData(0, 0, width, height);
+
+  let minX = width;
+  let minY = height;
+  let maxX = 0;
+  let maxY = 0;
+  let found = false;
+  const step = 4;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      if (isHighlightYellow(data[i], data[i + 1], data[i + 2])) {
+        found = true;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (!found) return null;
+
+  const pad = 24;
+  const cropX = Math.max(0, minX - pad);
+  const cropY = Math.max(0, minY - pad);
+  const cropW = Math.min(width - cropX, maxX - minX + pad * 2);
+  const cropH = Math.min(height - cropY, maxY - minY + pad * 2);
+  if (cropW < 12 || cropH < 12) return null;
+
+  const scale = 3;
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = cropW * scale;
+  outCanvas.height = cropH * scale;
+  const outCtx = outCanvas.getContext('2d');
+  if (!outCtx) return null;
+  outCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, outCanvas.width, outCanvas.height);
+
+  return new Promise((resolve) => outCanvas.toBlob((b) => resolve(b), 'image/png'));
 }
 
 export async function recognizeLabelText(image: Blob): Promise<OcrResult> {
-  const result = await recognize(image, 'eng');
-  const lines: OcrLine[] = result.data.lines.map((line) => ({
-    text: line.text.trim(),
-    confidence: line.confidence,
-    height: line.bbox.y1 - line.bbox.y0,
-  }));
-  return { text: result.data.text, lines };
+  const highlight = await cropToHighlight(image).catch(() => null);
+  const targets = highlight ? [highlight, image] : [image];
+
+  const texts: string[] = [];
+  for (const target of targets) {
+    const result = await recognize(target, 'eng');
+    texts.push(result.data.text);
+  }
+  // The highlighted crop's text comes first so its Rx# match wins if the
+  // full label also contains other digit strings that could be confused
+  // for it (NDC codes, phone numbers, refill counts, etc).
+  return { text: texts.join('\n') };
 }
 
 const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
