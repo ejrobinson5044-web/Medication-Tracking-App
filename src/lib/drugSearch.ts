@@ -43,3 +43,38 @@ export async function searchDrugNames(query: string): Promise<string[]> {
     return [];
   }
 }
+
+export interface ParsedDrugName {
+  name: string;
+  brandOrCommonName?: string;
+  amount?: string;
+}
+
+const STRENGTH_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|%|unt|units?)\b/i;
+
+/**
+ * RxNorm's display names pack the generic name, strength, dosage form, and
+ * (for branded concepts) the brand name into one string, e.g.
+ * "lurasidone hydrochloride 60 MG Oral Tablet [Latuda]". Splits that back
+ * into the separate fields the form actually has, so picking a suggestion
+ * fills in name/brand/dose instead of dumping the raw string into Name.
+ */
+export function parseDrugDisplayName(raw: string): ParsedDrugName {
+  let text = raw.trim();
+
+  let brandOrCommonName: string | undefined;
+  const bracketMatch = text.match(/\[([^\]]+)\]/);
+  if (bracketMatch) {
+    brandOrCommonName = bracketMatch[1].trim();
+    text = text.slice(0, bracketMatch.index).trim();
+  }
+
+  let amount: string | undefined;
+  const strengthMatch = text.match(STRENGTH_PATTERN);
+  if (strengthMatch && strengthMatch.index !== undefined) {
+    amount = strengthMatch[0].replace(/\s+/, ' ').trim();
+    text = text.slice(0, strengthMatch.index).trim();
+  }
+
+  return { name: text || raw.trim(), brandOrCommonName, amount };
+}

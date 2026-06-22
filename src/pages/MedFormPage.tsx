@@ -5,7 +5,7 @@ import { medicationsStore, rxLookupStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
 import { lookupNdc } from '../lib/ndcLookup';
-import { searchDrugNames } from '../lib/drugSearch';
+import { searchDrugNames, parseDrugDisplayName } from '../lib/drugSearch';
 import RxHighlightPicker from '../components/RxHighlightPicker';
 import {
   TIMES_OF_DAY,
@@ -110,9 +110,15 @@ export default function MedFormPage() {
     return () => clearTimeout(timer);
   }, [form.name]);
 
-  function selectNameSuggestion(name: string) {
+  function selectNameSuggestion(raw: string) {
     suppressNextLookup.current = true;
-    setForm((prev) => ({ ...prev, name }));
+    const parsed = parseDrugDisplayName(raw);
+    setForm((prev) => ({
+      ...prev,
+      name: parsed.name,
+      brandOrCommonName: prev.brandOrCommonName || parsed.brandOrCommonName || prev.brandOrCommonName,
+      amount: prev.amount || parsed.amount || prev.amount,
+    }));
     setShowSuggestions(false);
   }
 
