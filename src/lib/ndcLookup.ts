@@ -22,7 +22,7 @@ function titleCase(text: string): string {
     .join(' ');
 }
 
-async function fetchByField(field: 'package_ndc' | 'product_ndc', value: string): Promise<OpenFdaNdcResult | null> {
+async function fetchByField(field: 'packaging.package_ndc' | 'product_ndc', value: string): Promise<OpenFdaNdcResult | null> {
   const res = await fetch(
     `https://api.fda.gov/drug/ndc.json?search=${field}:"${encodeURIComponent(value)}"&limit=1`,
   );
@@ -47,7 +47,7 @@ export async function lookupNdc(ndc: string): Promise<NdcLookupResult | null> {
     const segments = ndc.split('-');
     const productNdc = segments.length >= 2 ? segments.slice(0, 2).join('-') : ndc;
 
-    const result = (await fetchByField('package_ndc', ndc)) ?? (await fetchByField('product_ndc', productNdc));
+    const result = (await fetchByField('packaging.package_ndc', ndc)) ?? (await fetchByField('product_ndc', productNdc));
     if (!result || !result.generic_name) {
       cache.set(ndc, null);
       return null;
