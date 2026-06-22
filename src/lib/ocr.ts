@@ -5,110 +5,49 @@ export interface OcrResult {
   text: string;
 }
 
-function loadImage(blob: Blob): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(blob);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('Failed to load image'));
-    };
-    img.src = url;
-  });
-}
+const MAX_DIMENSION = 1600;
 
-// Pharmacies almost universally highlight the Rx# on the sticker in
-// highlighter yellow: strong red+green, much weaker blue, and not washed
-// out toward white or gray.
-function isHighlightYellow(r: number, g: number, b: number): boolean {
-  return r > 170 && g > 150 && b < 150 && r - b > 40 && g - b > 30;
-}
+// Phone camera photos are often 8-12+ megapixels, which can make Tesseract
+// take a very long time (or stall) on-device. Dose/frequency text is large
+// and legible even downscaled, so shrinking first keeps this background
+// pass fast and reliable.
+async function downscale(blob: Blob): Promise<Blob> {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Failed to load image'));
+      el.src = url;
+    });
+    const scale = Math.min(1, MAX_DIMENSION / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale >= 1) return blob;
 
-/**
- * Scans the photo for a highlighter-yellow patch and crops + upscales just
- * that region. Running OCR on this tight, enlarged crop instead of the
- * whole label dramatically improves Rx# read accuracy, since that's where
- * pharmacies mark the one number that's reliable across refills.
- */
-async function cropToHighlight(blob: Blob): Promise<Blob | null> {
-  const img = await loadImage(blob);
-  const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx || canvas.width === 0 || canvas.height === 0) return null;
-  ctx.drawImage(img, 0, 0);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth * scale;
+    canvas.height = img.naturalHeight * scale;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return blob;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-  const { width, height } = canvas;
-  const { data } = ctx.getImageData(0, 0, width, height);
-
-  let minX = width;
-  let minY = height;
-  let maxX = 0;
-  let maxY = 0;
-  let found = false;
-  const step = 4;
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width; x += step) {
-      const i = (y * width + x) * 4;
-      if (isHighlightYellow(data[i], data[i + 1], data[i + 2])) {
-        found = true;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
+    const resized = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.85));
+    return resized ?? blob;
+  } finally {
+    URL.revokeObjectURL(url);
   }
-  if (!found) return null;
-
-  const pad = 24;
-  const cropX = Math.max(0, minX - pad);
-  const cropY = Math.max(0, minY - pad);
-  const cropW = Math.min(width - cropX, maxX - minX + pad * 2);
-  const cropH = Math.min(height - cropY, maxY - minY + pad * 2);
-  if (cropW < 12 || cropH < 12) return null;
-
-  const scale = 3;
-  const outCanvas = document.createElement('canvas');
-  outCanvas.width = cropW * scale;
-  outCanvas.height = cropH * scale;
-  const outCtx = outCanvas.getContext('2d');
-  if (!outCtx) return null;
-  outCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, outCanvas.width, outCanvas.height);
-
-  return new Promise((resolve) => outCanvas.toBlob((b) => resolve(b), 'image/png'));
 }
 
+// The Rx# itself is read via the manual highlight-and-crop flow
+// (RxHighlightPicker), since that's far more accurate than guessing at it
+// from the whole photo. This pass only needs the full-label text for the
+// patterns that match reliably anywhere on the label: dose and frequency.
 export async function recognizeLabelText(image: Blob): Promise<OcrResult> {
-  const highlight = await cropToHighlight(image).catch(() => null);
-  const targets = highlight ? [highlight, image] : [image];
-
-  const texts: string[] = [];
-  for (const target of targets) {
-    const result = await recognize(target, 'eng');
-    texts.push(result.data.text);
-  }
-  // The highlighted crop's text comes first so its Rx# match wins if the
-  // full label also contains other digit strings that could be confused
-  // for it (NDC codes, phone numbers, refill counts, etc).
-  return { text: texts.join('\n') };
+  const target = await downscale(image).catch(() => image);
+  const result = await recognize(target, 'eng');
+  return { text: result.data.text };
 }
 
 const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
-
-// Pharmacy labels print the Rx/prescription number in formats like
-// "Rx# 1234567", "RX: 1234567", "Rx No. 1234567", "Prescription #1234567"
-// — it's printed cleanly and consistently across refills (the same Rx#
-// reprints on every refill of the same prescription), which makes it a far
-// more reliable identifier than guessing the drug name off the label, where
-// the patient's own name is often the largest, highest-confidence text and
-// gets mistaken for the drug name.
-const RX_NUMBER_PATTERN = /\b(?:Rx|Prescription)\.?\s*(?:#|No\.?|number)?\s*[:#]?\s*(\d{5,10})\b/i;
 
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
 const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -129,22 +68,15 @@ const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 /**
- * Pulls the Rx# and the patterns we can match reliably (dose, frequency)
- * straight out of the label text. We deliberately do NOT guess the drug
- * name from font size/line position anymore — on real pharmacy labels the
- * patient's own name is often the largest, highest-confidence line, which
- * made that heuristic confidently wrong. The Rx# is the one thing printed
- * consistently across refills, so it's the only reliable identifier; the
- * caller looks it up against previously-saved medications to fill in the
- * name, and otherwise leaves the name for the person to type once.
+ * Pulls dose and frequency out of the label text via plain regex, since
+ * those read reliably anywhere on a label. We deliberately do NOT guess the
+ * drug name or Rx# from OCR here — on real pharmacy labels the patient's
+ * own name is often the largest, highest-confidence line, which made
+ * font-size-based name guessing confidently wrong. The Rx# is read
+ * separately via the manual highlight-and-crop flow instead.
  */
-export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> & { rxNumber?: string } {
-  const result: Partial<MedicationInput> & { rxNumber?: string } = {};
-
-  const rxMatch = text.match(RX_NUMBER_PATTERN);
-  if (rxMatch) {
-    result.rxNumber = rxMatch[1];
-  }
+export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> {
+  const result: Partial<MedicationInput> = {};
 
   const doseMatch = text.match(DOSE_PATTERN);
   if (doseMatch) {
