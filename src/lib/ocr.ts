@@ -58,6 +58,12 @@ const STOPWORDS = [
 
 const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
 
+// Pharmacy labels print the Rx/prescription number in formats like
+// "Rx# 1234567", "RX: 1234567", "Rx No. 1234567" — it's printed cleanly and
+// consistently across refills, making it a far more reliable identifier
+// than guessing the drug name from font size each scan.
+const RX_NUMBER_PATTERN = /\bRx\.?\s*(?:#|No\.?|number)?\s*[:#]?\s*(\d{5,9})\b/i;
+
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
 const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /every\s+other\s+day|q\.?o\.?d\.?\b/i, label: 'Every other day' },
@@ -117,8 +123,13 @@ function pickNameLine(lines: OcrLine[]): string | null {
   return scored[0].line.text;
 }
 
-export function parseLabelText({ text, lines }: OcrResult): Partial<MedicationInput> {
-  const result: Partial<MedicationInput> = {};
+export function parseLabelText({ text, lines }: OcrResult): Partial<MedicationInput> & { rxNumber?: string } {
+  const result: Partial<MedicationInput> & { rxNumber?: string } = {};
+
+  const rxMatch = text.match(RX_NUMBER_PATTERN);
+  if (rxMatch) {
+    result.rxNumber = rxMatch[1];
+  }
 
   const doseMatch = text.match(DOSE_PATTERN);
   if (doseMatch) {

@@ -20,6 +20,7 @@ export interface Medication {
   id: string;
   name: string;
   brandOrCommonName?: string;
+  rxNumber?: string;
   amount: string;
   frequency: string;
   timesOfDay: TimeOfDay[];
@@ -37,4 +38,17 @@ export interface DoseLog {
   timeOfDay: TimeOfDay;
   taken: boolean;
   takenAt?: string;
+}
+
+// A label scanned once for a given Rx number is reused on future scans
+// (refills print the same Rx# with the same drug info) so OCR only has to
+// get the name/dose/frequency right a single time per prescription.
+export interface RxLookupEntry {
+  rxNumber: string;
+  name: string;
+  brandOrCommonName?: string;
+  amount: string;
+  frequency: string;
+  notes?: string;
+  updatedAt: string;
 }
