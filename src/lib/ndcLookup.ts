@@ -1,6 +1,7 @@
 interface OpenFdaNdcResult {
   generic_name?: string;
   brand_name?: string;
+  active_ingredients?: Array<{ name?: string; strength?: string }>;
 }
 
 interface OpenFdaNdcResponse {
@@ -10,9 +11,17 @@ interface OpenFdaNdcResponse {
 export interface NdcLookupResult {
   name: string;
   brandOrCommonName?: string;
+  amount?: string;
 }
 
 const cache = new Map<string, NdcLookupResult | null>();
+
+// openFDA reports strength as "<amount> <unit>/<denominator>" (e.g. "80 mg/1");
+// the denominator is only meaningful for liquids/concentrations, so drop a
+// trailing "/1" since that's just "per one [tablet/capsule/unit]".
+function formatStrength(strength: string): string {
+  return strength.replace(/\/1$/, '').trim();
+}
 
 function titleCase(text: string): string {
   return text
@@ -53,11 +62,13 @@ export async function lookupNdc(ndc: string): Promise<NdcLookupResult | null> {
       return null;
     }
 
+    const strength = result.active_ingredients?.[0]?.strength;
     const looked: NdcLookupResult = {
       name: titleCase(result.generic_name),
       brandOrCommonName: result.brand_name && result.brand_name.toLowerCase() !== result.generic_name.toLowerCase()
         ? titleCase(result.brand_name)
         : undefined,
+      amount: strength ? formatStrength(strength) : undefined,
     };
     cache.set(ndc, looked);
     return looked;

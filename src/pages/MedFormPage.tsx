@@ -125,8 +125,13 @@ export default function MedFormPage() {
           ...prev,
           name: prev.name || ndcResult.name,
           brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
+          amount: prev.amount || ndcResult.amount || prev.amount,
         }));
-        setScanInfo(`Identified from NDC: ${ndcResult.name}.`);
+        setScanInfo(
+          ndcResult.brandOrCommonName
+            ? `Identified from NDC: ${ndcResult.name} (${ndcResult.brandOrCommonName}).`
+            : `Identified from NDC: ${ndcResult.name}.`,
+        );
       }
     } finally {
       setNdcLooking(false);
