@@ -51,8 +51,21 @@ const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
 
 // The NDC (National Drug Code) is a standardized, publicly-lookupable
 // identifier — unlike the Rx#, which is pharmacy-internal. Printed as
-// 3 dash-separated digit groups, usually labeled "NDC".
-const NDC_PATTERN = /\bNDC[:\s]*(\d{4,5}-\d{3,4}-\d{1,2})\b/i;
+// 3 dash-separated digit groups, usually (but not always reliably, once
+// OCR'd) labeled "NDC". Print is tiny, so digits commonly get misread as
+// look-alike letters (O/0, I or l/1, S/5, B/8) — normalize those within a
+// candidate group before validating/returning it.
+const NDC_LABELED_PATTERN = /\bN[D0O][C0O][:\s#]*([\dOIlSB]{4,5}[-\s][\dOIlSB]{3,4}[-\s][\dOIlSB]{1,2})\b/i;
+const NDC_SHAPE_PATTERN = /\b([\dOIlSB]{4,5}-[\dOIlSB]{3,4}-[\dOIlSB]{1,2})\b/;
+
+function normalizeOcrDigits(group: string): string {
+  return group
+    .replace(/[OoQ]/g, '0')
+    .replace(/[IilL]/g, '1')
+    .replace(/[Ss]/g, '5')
+    .replace(/[Bb]/g, '8')
+    .replace(/\s/g, '-');
+}
 
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
 const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -84,9 +97,9 @@ const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> & { ndc?: string } {
   const result: Partial<MedicationInput> & { ndc?: string } = {};
 
-  const ndcMatch = text.match(NDC_PATTERN);
+  const ndcMatch = text.match(NDC_LABELED_PATTERN) ?? text.match(NDC_SHAPE_PATTERN);
   if (ndcMatch) {
-    result.ndc = ndcMatch[1];
+    result.ndc = normalizeOcrDigits(ndcMatch[1]);
   }
 
   const doseMatch = text.match(DOSE_PATTERN);
