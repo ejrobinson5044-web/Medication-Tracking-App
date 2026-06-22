@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { Medication, DoseLog } from './types';
+import { pushMedication, deleteMedicationRemote, pushDoseLog } from './sync';
 
 interface MedTrackerDB extends DBSchema {
   medications: {
@@ -11,6 +12,10 @@ interface MedTrackerDB extends DBSchema {
     value: DoseLog;
     indexes: { 'by-date': string; 'by-med': string };
   };
+}
+
+interface WriteOptions {
+  skipSync?: boolean;
 }
 
 const DB_NAME = 'medication-tracker';
@@ -45,11 +50,12 @@ export const medicationsStore = {
     const db = await getDb();
     return db.get('medications', id);
   },
-  async put(med: Medication): Promise<void> {
+  async put(med: Medication, options: WriteOptions = {}): Promise<void> {
     const db = await getDb();
     await db.put('medications', med);
+    if (!options.skipSync) void pushMedication(med);
   },
-  async delete(id: string): Promise<void> {
+  async delete(id: string, options: WriteOptions = {}): Promise<void> {
     const db = await getDb();
     await db.delete('medications', id);
     const tx = db.transaction('doseLogs', 'readwrite');
@@ -58,6 +64,7 @@ export const medicationsStore = {
       await cursor.delete();
     }
     await tx.done;
+    if (!options.skipSync) void deleteMedicationRemote(id);
   },
 };
 
@@ -66,8 +73,9 @@ export const doseLogsStore = {
     const db = await getDb();
     return db.getAllFromIndex('doseLogs', 'by-date', date);
   },
-  async put(log: DoseLog): Promise<void> {
+  async put(log: DoseLog, options: WriteOptions = {}): Promise<void> {
     const db = await getDb();
     await db.put('doseLogs', log);
+    if (!options.skipSync) void pushDoseLog(log);
   },
 };
