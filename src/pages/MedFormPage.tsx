@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { medicationsStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
+import { searchDrugNames } from '../lib/drugSearch';
 import { TIMES_OF_DAY, TIME_OF_DAY_LABELS, type Medication, type MedicationInput, type TimeOfDay } from '../lib/types';
 
 const emptyForm: MedicationInput = {
@@ -24,6 +25,9 @@ export default function MedFormPage() {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [nameSuggestions, setNameSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const suppressNextLookup = useRef(false);
 
   useEffect(() => {
     if (!id) return;
@@ -42,6 +46,31 @@ export default function MedFormPage() {
       setLoading(false);
     })();
   }, [id]);
+
+  useEffect(() => {
+    if (suppressNextLookup.current) {
+      suppressNextLookup.current = false;
+      return;
+    }
+    const query = form.name;
+    if (query.trim().length < 2) {
+      setNameSuggestions([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void searchDrugNames(query).then((results) => {
+        setNameSuggestions(results);
+        setShowSuggestions(results.length > 0);
+      });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [form.name]);
+
+  function selectNameSuggestion(name: string) {
+    suppressNextLookup.current = true;
+    setForm((prev) => ({ ...prev, name }));
+    setShowSuggestions(false);
+  }
 
   function toggleTime(tod: TimeOfDay) {
     setForm((prev) => ({
@@ -73,8 +102,8 @@ export default function MedFormPage() {
     setScanning(true);
     setScanError(null);
     try {
-      const text = await recognizeLabelText(file);
-      const parsed = parseLabelText(text);
+      const ocrResult = await recognizeLabelText(file);
+      const parsed = parseLabelText(ocrResult);
       if (!parsed.name && !parsed.amount && !parsed.frequency) {
         setScanError("Couldn't make out the label clearly. Try a closer, well-lit photo, or enter details manually.");
         return;
@@ -145,14 +174,28 @@ export default function MedFormPage() {
       </div>
 
       <form className="med-form" onSubmit={handleSubmit}>
-        <label>
+        <label className="name-field">
           Name
           <input
             required
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
+            onFocus={() => setShowSuggestions(nameSuggestions.length > 0)}
+            onBlur={() => setTimeout(() => setShowSuggestions(false), 100)}
             placeholder="e.g. Lisinopril"
+            autoComplete="off"
           />
+          {showSuggestions && (
+            <ul className="suggestion-list">
+              {nameSuggestions.map((suggestion) => (
+                <li key={suggestion}>
+                  <button type="button" onMouseDown={() => selectNameSuggestion(suggestion)}>
+                    {suggestion}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </label>
 
         <label>
