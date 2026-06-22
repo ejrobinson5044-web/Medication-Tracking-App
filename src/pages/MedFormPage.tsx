@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuid } from 'uuid';
 import { medicationsStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
+import { recognizeLabelText, parseLabelText } from '../lib/ocr';
 import { TIMES_OF_DAY, TIME_OF_DAY_LABELS, type Medication, type MedicationInput, type TimeOfDay } from '../lib/types';
 
 const emptyForm: MedicationInput = {
@@ -20,6 +21,9 @@ export default function MedFormPage() {
   const navigate = useNavigate();
   const [form, setForm] = useState<MedicationInput>(emptyForm);
   const [loading, setLoading] = useState(isEdit);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -61,6 +65,33 @@ export default function MedFormPage() {
     }
   }
 
+  async function handleScanFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setScanning(true);
+    setScanError(null);
+    try {
+      const text = await recognizeLabelText(file);
+      const parsed = parseLabelText(text);
+      if (!parsed.name && !parsed.amount && !parsed.frequency) {
+        setScanError("Couldn't make out the label clearly. Try a closer, well-lit photo, or enter details manually.");
+        return;
+      }
+      setForm((prev) => ({
+        ...prev,
+        name: prev.name || parsed.name || prev.name,
+        amount: prev.amount || parsed.amount || prev.amount,
+        frequency: prev.frequency || parsed.frequency || prev.frequency,
+      }));
+    } catch {
+      setScanError('Scan failed. Try again or enter details manually.');
+    } finally {
+      setScanning(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const now = new Date().toISOString();
@@ -92,6 +123,26 @@ export default function MedFormPage() {
       <header className="page-header">
         <h1>{isEdit ? 'Edit Medication' : 'Add Medication'}</h1>
       </header>
+
+      <div className="scan-section">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleScanFile}
+          hidden
+        />
+        <button
+          type="button"
+          className="secondary-button scan-button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={scanning}
+        >
+          {scanning ? 'Reading label…' : '📷 Scan a label or upload a photo'}
+        </button>
+        {scanError && <p className="login-error">{scanError}</p>}
+      </div>
 
       <form className="med-form" onSubmit={handleSubmit}>
         <label>
