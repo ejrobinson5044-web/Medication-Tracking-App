@@ -290,6 +290,15 @@ h2 {
   padding: 0.25rem;
 }
 
+.scan-section {
+  margin-bottom: 1.25rem;
+}
+
+.scan-button {
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+}
+
 .med-form {
   display: flex;
   flex-direction: column;
