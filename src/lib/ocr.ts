@@ -49,6 +49,11 @@ export async function recognizeLabelText(image: Blob): Promise<OcrResult> {
 
 const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
 
+// The NDC (National Drug Code) is a standardized, publicly-lookupable
+// identifier — unlike the Rx#, which is pharmacy-internal. Printed as
+// 3 dash-separated digit groups, usually labeled "NDC".
+const NDC_PATTERN = /\bNDC[:\s]*(\d{4,5}-\d{3,4}-\d{1,2})\b/i;
+
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
 const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /every\s+other\s+day|q\.?o\.?d\.?\b/i, label: 'Every other day' },
@@ -68,15 +73,21 @@ const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 /**
- * Pulls dose and frequency out of the label text via plain regex, since
- * those read reliably anywhere on a label. We deliberately do NOT guess the
- * drug name or Rx# from OCR here — on real pharmacy labels the patient's
- * own name is often the largest, highest-confidence line, which made
- * font-size-based name guessing confidently wrong. The Rx# is read
- * separately via the manual highlight-and-crop flow instead.
+ * Pulls the NDC, dose, and frequency out of the label text via plain regex
+ * — all of these read reliably anywhere on a label. We deliberately do NOT
+ * guess the drug name from OCR here — on real pharmacy labels the
+ * patient's own name is often the largest, highest-confidence line, which
+ * made font-size-based name guessing confidently wrong. The Rx# is read
+ * separately via the manual highlight-and-crop flow, since it's not
+ * reliably formatted/labeled enough to regex-match like the NDC is.
  */
-export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> {
-  const result: Partial<MedicationInput> = {};
+export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> & { ndc?: string } {
+  const result: Partial<MedicationInput> & { ndc?: string } = {};
+
+  const ndcMatch = text.match(NDC_PATTERN);
+  if (ndcMatch) {
+    result.ndc = ndcMatch[1];
+  }
 
   const doseMatch = text.match(DOSE_PATTERN);
   if (doseMatch) {
