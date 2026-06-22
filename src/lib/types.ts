@@ -20,6 +20,7 @@ export interface Medication {
   id: string;
   name: string;
   brandOrCommonName?: string;
+  ndc?: string;
   rxNumber?: string;
   amount: string;
   frequency: string;
