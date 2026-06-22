@@ -5,7 +5,41 @@ import { medicationsStore, rxLookupStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
 import { searchDrugNames } from '../lib/drugSearch';
-import { TIMES_OF_DAY, TIME_OF_DAY_LABELS, type Medication, type MedicationInput, type TimeOfDay } from '../lib/types';
+import RxHighlightPicker from '../components/RxHighlightPicker';
+import {
+  TIMES_OF_DAY,
+  TIME_OF_DAY_LABELS,
+  type Medication,
+  type MedicationInput,
+  type RxLookupEntry,
+  type TimeOfDay,
+} from '../lib/types';
+
+function levenshtein(a: string, b: string): number {
+  const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] =
+        a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+/** Surfaces close matches (not just exact) since a hand-cropped OCR read of
+ * a single digit string can easily be off by a digit or two. */
+function findRxCandidates(digits: string, entries: RxLookupEntry[]): RxLookupEntry[] {
+  return entries
+    .map((entry) => ({ entry, distance: levenshtein(digits, entry.rxNumber) }))
+    .filter(({ entry, distance }) => distance <= 2 || entry.rxNumber.includes(digits) || digits.includes(entry.rxNumber))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 5)
+    .map(({ entry }) => entry);
+}
 
 const emptyForm: MedicationInput = {
   name: '',
@@ -26,6 +60,9 @@ export default function MedFormPage() {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanInfo, setScanInfo] = useState<string | null>(null);
+  const [pendingImage, setPendingImage] = useState<Blob | null>(null);
+  const [rxCandidates, setRxCandidates] = useState<RxLookupEntry[]>([]);
+  const [extractedRxNumber, setExtractedRxNumber] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [nameSuggestions, setNameSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -102,52 +139,79 @@ export default function MedFormPage() {
     e.target.value = '';
     if (!file) return;
 
-    setScanning(true);
     setScanError(null);
     setScanInfo(null);
+    setRxCandidates([]);
+    setExtractedRxNumber(null);
+    setPendingImage(file);
+
+    // Dose/frequency are matched with plain regex and read reliably off the
+    // whole photo, so fill those in the background while the person
+    // highlights the Rx# themselves below.
+    setScanning(true);
     try {
       const ocrResult = await recognizeLabelText(file);
       const parsed = parseLabelText(ocrResult);
-
-      if (parsed.rxNumber) {
-        const known = await rxLookupStore.get(parsed.rxNumber);
-        if (known) {
-          // We've seen this Rx# before (likely a refill) — trust the saved
-          // details over a fresh OCR guess at the name.
-          setForm((prev) => ({
-            ...prev,
-            rxNumber: known.rxNumber,
-            name: known.name,
-            brandOrCommonName: known.brandOrCommonName || '',
-            amount: prev.amount || known.amount,
-            frequency: prev.frequency || known.frequency,
-            notes: prev.notes || known.notes || '',
-          }));
-          return;
-        }
-      }
-
-      if (!parsed.amount && !parsed.frequency && !parsed.rxNumber) {
-        setScanError("Couldn't make out the label clearly. Try a closer, well-lit photo, or enter details manually.");
-        return;
-      }
       setForm((prev) => ({
         ...prev,
-        rxNumber: prev.rxNumber || parsed.rxNumber || prev.rxNumber,
         amount: prev.amount || parsed.amount || prev.amount,
         frequency: prev.frequency || parsed.frequency || prev.frequency,
       }));
-      // The drug name isn't reliably readable off the label (patient name
-      // usually dominates the OCR), so this is a new Rx# we haven't seen —
-      // ask once, then it's remembered for every future refill.
-      if (parsed.rxNumber) {
-        setScanInfo("New prescription scanned — enter the medication name once below and we'll remember it for refills.");
-      }
     } catch {
-      setScanError('Scan failed. Try again or enter details manually.');
+      // Non-fatal — the Rx highlight step below is the primary path.
     } finally {
       setScanning(false);
     }
+  }
+
+  async function handleRxHighlightResult(digits: string) {
+    setExtractedRxNumber(digits);
+    const known = await rxLookupStore.get(digits);
+    if (known) {
+      applyRxMatch(known);
+      return;
+    }
+    const allEntries = await rxLookupStore.getAll();
+    const candidates = findRxCandidates(digits, allEntries);
+    if (candidates.length === 0) {
+      setForm((prev) => ({ ...prev, rxNumber: digits }));
+      setScanInfo("New prescription — enter the medication name once below and we'll remember it for refills.");
+      setPendingImage(null);
+      return;
+    }
+    setRxCandidates(candidates);
+  }
+
+  function applyRxMatch(entry: RxLookupEntry) {
+    setForm((prev) => ({
+      ...prev,
+      rxNumber: entry.rxNumber,
+      name: entry.name,
+      brandOrCommonName: entry.brandOrCommonName || '',
+      amount: prev.amount || entry.amount,
+      frequency: prev.frequency || entry.frequency,
+      notes: prev.notes || entry.notes || '',
+    }));
+    setScanInfo(`Matched to a saved prescription — filled in ${entry.name}.`);
+    setPendingImage(null);
+    setRxCandidates([]);
+    setExtractedRxNumber(null);
+  }
+
+  function handleNoCandidateMatch() {
+    if (extractedRxNumber) {
+      setForm((prev) => ({ ...prev, rxNumber: extractedRxNumber }));
+      setScanInfo("New prescription — enter the medication name once below and we'll remember it for refills.");
+    }
+    setPendingImage(null);
+    setRxCandidates([]);
+    setExtractedRxNumber(null);
+  }
+
+  function cancelScan() {
+    setPendingImage(null);
+    setRxCandidates([]);
+    setExtractedRxNumber(null);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -212,6 +276,37 @@ export default function MedFormPage() {
         </button>
         {scanError && <p className="login-error">{scanError}</p>}
         {scanInfo && <p className="login-info">{scanInfo}</p>}
+
+        {pendingImage && rxCandidates.length === 0 && (
+          <RxHighlightPicker
+            image={pendingImage}
+            onResult={(digits) => void handleRxHighlightResult(digits)}
+            onCancel={cancelScan}
+          />
+        )}
+
+        {rxCandidates.length > 0 && (
+          <div className="rx-picker">
+            <p className="rx-picker-hint">
+              Read “{extractedRxNumber}” — which prescription is this?
+            </p>
+            <ul className="rx-candidate-list">
+              {rxCandidates.map((c) => (
+                <li key={c.rxNumber}>
+                  <button type="button" onClick={() => applyRxMatch(c)}>
+                    {c.name}
+                    <span className="rx-candidate-meta">Rx# {c.rxNumber}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={handleNoCandidateMatch}>
+                None of these — new prescription
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <form className="med-form" onSubmit={handleSubmit}>

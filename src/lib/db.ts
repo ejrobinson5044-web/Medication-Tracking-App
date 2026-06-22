@@ -92,6 +92,10 @@ export const rxLookupStore = {
     const db = await getDb();
     return db.get('rxLookup', rxNumber);
   },
+  async getAll(): Promise<RxLookupEntry[]> {
+    const db = await getDb();
+    return db.getAll('rxLookup');
+  },
   async put(entry: RxLookupEntry): Promise<void> {
     const db = await getDb();
     await db.put('rxLookup', entry);
