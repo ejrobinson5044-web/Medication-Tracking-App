@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { Medication, DoseLog } from './types';
+import type { Medication, DoseLog, RxLookupEntry } from './types';
 import { pushMedication, deleteMedicationRemote, pushDoseLog } from './sync';
 
 interface MedTrackerDB extends DBSchema {
@@ -12,6 +12,10 @@ interface MedTrackerDB extends DBSchema {
     value: DoseLog;
     indexes: { 'by-date': string; 'by-med': string };
   };
+  rxLookup: {
+    key: string;
+    value: RxLookupEntry;
+  };
 }
 
 interface WriteOptions {
@@ -19,7 +23,7 @@ interface WriteOptions {
 }
 
 const DB_NAME = 'medication-tracker';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBPDatabase<MedTrackerDB>> | null = null;
 
@@ -34,6 +38,9 @@ function getDb(): Promise<IDBPDatabase<MedTrackerDB>> {
           const store = db.createObjectStore('doseLogs', { keyPath: 'id' });
           store.createIndex('by-date', 'date');
           store.createIndex('by-med', 'medId');
+        }
+        if (!db.objectStoreNames.contains('rxLookup')) {
+          db.createObjectStore('rxLookup', { keyPath: 'rxNumber' });
         }
       },
     });
@@ -77,5 +84,16 @@ export const doseLogsStore = {
     const db = await getDb();
     await db.put('doseLogs', log);
     if (!options.skipSync) void pushDoseLog(log);
+  },
+};
+
+export const rxLookupStore = {
+  async get(rxNumber: string): Promise<RxLookupEntry | undefined> {
+    const db = await getDb();
+    return db.get('rxLookup', rxNumber);
+  },
+  async put(entry: RxLookupEntry): Promise<void> {
+    const db = await getDb();
+    await db.put('rxLookup', entry);
   },
 };

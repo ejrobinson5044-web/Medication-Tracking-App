@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuid } from 'uuid';
-import { medicationsStore } from '../lib/db';
+import { medicationsStore, rxLookupStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
 import { searchDrugNames } from '../lib/drugSearch';
@@ -10,6 +10,7 @@ import { TIMES_OF_DAY, TIME_OF_DAY_LABELS, type Medication, type MedicationInput
 const emptyForm: MedicationInput = {
   name: '',
   brandOrCommonName: '',
+  rxNumber: '',
   amount: '',
   frequency: '',
   timesOfDay: [],
@@ -37,6 +38,7 @@ export default function MedFormPage() {
         setForm({
           name: med.name,
           brandOrCommonName: med.brandOrCommonName ?? '',
+          rxNumber: med.rxNumber ?? '',
           amount: med.amount,
           frequency: med.frequency,
           timesOfDay: med.timesOfDay,
@@ -104,12 +106,32 @@ export default function MedFormPage() {
     try {
       const ocrResult = await recognizeLabelText(file);
       const parsed = parseLabelText(ocrResult);
-      if (!parsed.name && !parsed.amount && !parsed.frequency) {
+
+      if (parsed.rxNumber) {
+        const known = await rxLookupStore.get(parsed.rxNumber);
+        if (known) {
+          // We've seen this Rx# before (likely a refill) — trust the saved
+          // details over a fresh OCR guess.
+          setForm((prev) => ({
+            ...prev,
+            rxNumber: known.rxNumber,
+            name: prev.name || known.name,
+            brandOrCommonName: prev.brandOrCommonName || known.brandOrCommonName || '',
+            amount: prev.amount || known.amount,
+            frequency: prev.frequency || known.frequency,
+            notes: prev.notes || known.notes || '',
+          }));
+          return;
+        }
+      }
+
+      if (!parsed.name && !parsed.amount && !parsed.frequency && !parsed.rxNumber) {
         setScanError("Couldn't make out the label clearly. Try a closer, well-lit photo, or enter details manually.");
         return;
       }
       setForm((prev) => ({
         ...prev,
+        rxNumber: prev.rxNumber || parsed.rxNumber || prev.rxNumber,
         name: prev.name || parsed.name || prev.name,
         amount: prev.amount || parsed.amount || prev.amount,
         frequency: prev.frequency || parsed.frequency || prev.frequency,
@@ -141,6 +163,17 @@ export default function MedFormPage() {
         updatedAt: now,
       };
       await medicationsStore.put(med);
+    }
+    if (form.rxNumber) {
+      await rxLookupStore.put({
+        rxNumber: form.rxNumber,
+        name: form.name,
+        brandOrCommonName: form.brandOrCommonName,
+        amount: form.amount,
+        frequency: form.frequency,
+        notes: form.notes,
+        updatedAt: now,
+      });
     }
     navigate('/meds');
   }
@@ -204,6 +237,15 @@ export default function MedFormPage() {
             value={form.brandOrCommonName}
             onChange={(e) => setForm({ ...form, brandOrCommonName: e.target.value })}
             placeholder="e.g. Prinivil (optional)"
+          />
+        </label>
+
+        <label>
+          Rx # (prescription number)
+          <input
+            value={form.rxNumber}
+            onChange={(e) => setForm({ ...form, rxNumber: e.target.value })}
+            placeholder="e.g. 1234567"
           />
         </label>
 
