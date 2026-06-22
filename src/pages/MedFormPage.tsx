@@ -45,6 +45,7 @@ function findRxCandidates(digits: string, entries: RxLookupEntry[]): RxLookupEnt
 const emptyForm: MedicationInput = {
   name: '',
   brandOrCommonName: '',
+  ndc: '',
   rxNumber: '',
   amount: '',
   frequency: '',
@@ -59,6 +60,7 @@ export default function MedFormPage() {
   const [form, setForm] = useState<MedicationInput>(emptyForm);
   const [loading, setLoading] = useState(isEdit);
   const [scanning, setScanning] = useState(false);
+  const [ndcLooking, setNdcLooking] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanInfo, setScanInfo] = useState<string | null>(null);
   const [pendingImage, setPendingImage] = useState<Blob | null>(null);
@@ -77,6 +79,7 @@ export default function MedFormPage() {
         setForm({
           name: med.name,
           brandOrCommonName: med.brandOrCommonName ?? '',
+          ndc: med.ndc ?? '',
           rxNumber: med.rxNumber ?? '',
           amount: med.amount,
           frequency: med.frequency,
@@ -111,6 +114,28 @@ export default function MedFormPage() {
     suppressNextLookup.current = true;
     setForm((prev) => ({ ...prev, name }));
     setShowSuggestions(false);
+  }
+
+  async function applyNdcLookup(ndc: string) {
+    setNdcLooking(true);
+    try {
+      const ndcResult = await lookupNdc(ndc);
+      if (ndcResult) {
+        setForm((prev) => ({
+          ...prev,
+          name: prev.name || ndcResult.name,
+          brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
+        }));
+        setScanInfo(`Identified from NDC: ${ndcResult.name}.`);
+      }
+    } finally {
+      setNdcLooking(false);
+    }
+  }
+
+  function handleNdcBlur() {
+    const ndc = form.ndc?.trim();
+    if (ndc) void applyNdcLookup(ndc);
   }
 
   function toggleTime(tod: TimeOfDay) {
@@ -162,15 +187,8 @@ export default function MedFormPage() {
       }));
 
       if (parsed.ndc) {
-        const ndcResult = await lookupNdc(parsed.ndc);
-        if (ndcResult) {
-          setForm((prev) => ({
-            ...prev,
-            name: prev.name || ndcResult.name,
-            brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
-          }));
-          setScanInfo(`Identified from NDC: ${ndcResult.name}.`);
-        }
+        setForm((prev) => ({ ...prev, ndc: prev.ndc || parsed.ndc }));
+        await applyNdcLookup(parsed.ndc);
       }
     } catch {
       // Non-fatal — the Rx highlight step below is the primary path.
@@ -333,6 +351,17 @@ export default function MedFormPage() {
       </div>
 
       <form className="med-form" onSubmit={handleSubmit}>
+        <label>
+          NDC (National Drug Code)
+          <input
+            value={form.ndc}
+            onChange={(e) => setForm({ ...form, ndc: e.target.value })}
+            onBlur={handleNdcBlur}
+            placeholder="e.g. 00074-3368-13"
+          />
+          {ndcLooking && <span className="login-info">Looking up…</span>}
+        </label>
+
         <label className="name-field">
           Name
           <input
