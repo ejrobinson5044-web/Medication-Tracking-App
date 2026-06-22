@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { medicationsStore, rxLookupStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
+import { lookupNdc } from '../lib/ndcLookup';
 import { searchDrugNames } from '../lib/drugSearch';
 import RxHighlightPicker from '../components/RxHighlightPicker';
 import {
@@ -147,7 +148,9 @@ export default function MedFormPage() {
 
     // Dose/frequency are matched with plain regex and read reliably off the
     // whole photo, so fill those in the background while the person
-    // highlights the Rx# themselves below.
+    // highlights the Rx# themselves below. The NDC, if present, is a real
+    // public identifier, so it can resolve the drug name automatically —
+    // unlike the Rx#, which only means something to the filling pharmacy.
     setScanning(true);
     try {
       const ocrResult = await recognizeLabelText(file);
@@ -157,6 +160,18 @@ export default function MedFormPage() {
         amount: prev.amount || parsed.amount || prev.amount,
         frequency: prev.frequency || parsed.frequency || prev.frequency,
       }));
+
+      if (parsed.ndc) {
+        const ndcResult = await lookupNdc(parsed.ndc);
+        if (ndcResult) {
+          setForm((prev) => ({
+            ...prev,
+            name: prev.name || ndcResult.name,
+            brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
+          }));
+          setScanInfo(`Identified from NDC: ${ndcResult.name}.`);
+        }
+      }
     } catch {
       // Non-fatal — the Rx highlight step below is the primary path.
     } finally {
@@ -175,7 +190,11 @@ export default function MedFormPage() {
     const candidates = findRxCandidates(digits, allEntries);
     if (candidates.length === 0) {
       setForm((prev) => ({ ...prev, rxNumber: digits }));
-      setScanInfo("New prescription — enter the medication name once below and we'll remember it for refills.");
+      setScanInfo(
+        form.name
+          ? `Rx# saved — we'll remember it's ${form.name} for refills.`
+          : "New prescription — enter the medication name once below and we'll remember it for refills.",
+      );
       setPendingImage(null);
       return;
     }
@@ -201,7 +220,11 @@ export default function MedFormPage() {
   function handleNoCandidateMatch() {
     if (extractedRxNumber) {
       setForm((prev) => ({ ...prev, rxNumber: extractedRxNumber }));
-      setScanInfo("New prescription — enter the medication name once below and we'll remember it for refills.");
+      setScanInfo(
+        form.name
+          ? `Rx# saved — we'll remember it's ${form.name} for refills.`
+          : "New prescription — enter the medication name once below and we'll remember it for refills.",
+      );
     }
     setPendingImage(null);
     setRxCandidates([]);
