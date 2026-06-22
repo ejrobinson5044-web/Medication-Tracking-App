@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { medicationsStore } from '../lib/db';
+import { checkInteractions } from '../lib/interactions';
+import InteractionWarnings from '../components/InteractionWarnings';
 import { TIME_OF_DAY_LABELS, type Medication } from '../lib/types';
 
 export default function MedsPage() {
@@ -24,6 +26,8 @@ export default function MedsPage() {
     setMeds((prev) => prev.filter((m) => m.id !== id));
   }
 
+  const interactionWarnings = useMemo(() => checkInteractions(meds), [meds]);
+
   if (loading) return <div className="page-loading">Loading...</div>;
 
   return (
@@ -31,6 +35,8 @@ export default function MedsPage() {
       <header className="page-header">
         <h1>Medications</h1>
       </header>
+
+      <InteractionWarnings warnings={interactionWarnings} />
 
       {meds.length === 0 ? (
         <p className="empty-state">No medications yet.</p>

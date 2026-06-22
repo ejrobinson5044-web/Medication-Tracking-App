@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuid } from 'uuid';
 import { medicationsStore } from '../lib/db';
+import { suggestTimesOfDay } from '../lib/frequency';
 import { TIMES_OF_DAY, TIME_OF_DAY_LABELS, type Medication, type MedicationInput, type TimeOfDay } from '../lib/types';
 
 const emptyForm: MedicationInput = {
@@ -45,6 +46,19 @@ export default function MedFormPage() {
         ? prev.timesOfDay.filter((t) => t !== tod)
         : [...prev.timesOfDay, tod],
     }));
+  }
+
+  function applySuggestedTimes() {
+    const suggested = suggestTimesOfDay(form.frequency);
+    if (suggested.length > 0) {
+      setForm((prev) => ({ ...prev, timesOfDay: suggested }));
+    }
+  }
+
+  function handleFrequencyBlur() {
+    if (form.timesOfDay.length === 0) {
+      applySuggestedTimes();
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -115,12 +129,18 @@ export default function MedFormPage() {
             required
             value={form.frequency}
             onChange={(e) => setForm({ ...form, frequency: e.target.value })}
-            placeholder="e.g. Once daily"
+            onBlur={handleFrequencyBlur}
+            placeholder="e.g. Twice daily"
           />
         </label>
 
         <fieldset className="time-of-day-picker">
-          <legend>Time(s) of day</legend>
+          <div className="time-of-day-header">
+            <legend>Time(s) of day</legend>
+            <button type="button" className="text-link" onClick={applySuggestedTimes}>
+              Suggest from frequency
+            </button>
+          </div>
           {TIMES_OF_DAY.map((tod) => (
             <label key={tod} className="checkbox-pill">
               <input

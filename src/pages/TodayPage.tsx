@@ -4,6 +4,8 @@ import { medicationsStore, doseLogsStore } from '../lib/db';
 import { todayKey } from '../lib/date';
 import { TIMES_OF_DAY, TIME_OF_DAY_LABELS, type Medication, type DoseLog, type TimeOfDay } from '../lib/types';
 import { generateIcs, downloadIcs } from '../lib/ics';
+import { checkInteractions } from '../lib/interactions';
+import InteractionWarnings from '../components/InteractionWarnings';
 
 export default function TodayPage() {
   const [meds, setMeds] = useState<Medication[]>([]);
@@ -33,6 +35,8 @@ export default function TodayPage() {
     }
     return map;
   }, [meds]);
+
+  const interactionWarnings = useMemo(() => checkInteractions(meds), [meds]);
 
   const totalDoses = meds.reduce((sum, m) => sum + m.timesOfDay.length, 0);
   const takenCount = logs.filter((l) => l.taken).length;
@@ -75,6 +79,8 @@ export default function TodayPage() {
           {totalDoses === 0 ? 'No doses scheduled' : `${remaining} of ${totalDoses} doses remaining`}
         </p>
       </header>
+
+      <InteractionWarnings warnings={interactionWarnings} />
 
       {meds.length === 0 ? (
         <p className="empty-state">No medications yet. Add one from the Medications tab.</p>

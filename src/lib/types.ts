@@ -4,7 +4,7 @@ export const TIMES_OF_DAY: TimeOfDay[] = ['morning', 'noon', 'evening', 'bedtime
 
 export const TIME_OF_DAY_LABELS: Record<TimeOfDay, string> = {
   morning: 'Morning',
-  noon: 'Noon',
+  noon: 'Afternoon',
   evening: 'Evening',
   bedtime: 'Bedtime',
 };
