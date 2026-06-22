@@ -299,6 +299,74 @@ h2 {
   border: 1px dashed var(--border-strong);
 }
 
+.rx-picker {
+  margin-top: 0.75rem;
+}
+
+.rx-picker-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.6rem;
+}
+
+.rx-picker-stage {
+  position: relative;
+  width: 100%;
+  border-radius: 0.9rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  touch-action: none;
+  user-select: none;
+}
+
+.rx-picker-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rx-picker-box {
+  position: absolute;
+  border: 2px solid var(--accent-bright);
+  background: rgba(167, 139, 250, 0.2);
+  box-shadow: 0 0 0 9999px rgba(10, 8, 26, 0.45);
+  pointer-events: none;
+}
+
+.rx-candidate-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.rx-candidate-list button {
+  width: 100%;
+  text-align: left;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  padding: 0.7rem 0.85rem;
+  color: var(--text);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.rx-candidate-list button:hover,
+.rx-candidate-list button:active {
+  border-color: var(--accent);
+  background: rgba(167, 139, 250, 0.14);
+}
+
+.rx-candidate-meta {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
+}
+
 .med-form {
   display: flex;
   flex-direction: column;
