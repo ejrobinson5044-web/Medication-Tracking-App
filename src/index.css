@@ -331,6 +331,44 @@ h2 {
   box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.2);
 }
 
+.name-field {
+  position: relative;
+}
+
+.suggestion-list {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  list-style: none;
+  margin: 0;
+  padding: 0.3rem;
+  background: var(--bg-mid);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.7rem;
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.6);
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.suggestion-list li button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 0.55rem 0.6rem;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.suggestion-list li button:hover,
+.suggestion-list li button:active {
+  background: rgba(167, 139, 250, 0.15);
+}
+
 .time-of-day-picker {
   border: none;
   padding: 0;
