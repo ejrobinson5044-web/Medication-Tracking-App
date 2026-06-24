@@ -5,6 +5,18 @@ import MedFormPage from './pages/MedFormPage';
 import LoginPage from './pages/LoginPage';
 import { useAuth } from './lib/auth';
 import { supabaseEnabled } from './lib/supabase';
+import { APP_VERSION } from './lib/version';
+
+const versionStyle = {
+  position: 'fixed',
+  right: '0.75rem',
+  bottom: 'calc(3.35rem + env(safe-area-inset-bottom))',
+  color: 'rgba(236, 232, 249, 0.36)',
+  fontSize: '0.68rem',
+  letterSpacing: '0.04em',
+  pointerEvents: 'none',
+  zIndex: 20,
+} as const;
 
 export default function App() {
   const { session, loading, signOut } = useAuth();
@@ -27,6 +39,9 @@ export default function App() {
           <Route path="/meds/:id/edit" element={<MedFormPage />} />
         </Routes>
       </main>
+      <span style={versionStyle} aria-label={`App version ${APP_VERSION}`}>
+        {APP_VERSION}
+      </span>
       <nav className="tab-bar">
         <NavLink to="/" className={({ isActive }) => (isActive ? 'tab active' : 'tab')} end>
           Today
