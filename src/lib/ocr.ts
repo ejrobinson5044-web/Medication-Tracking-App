@@ -1,9 +1,14 @@
 import { recognize } from 'tesseract.js';
-import { normalizeNdcOcr } from './ndc';
+import { ndcDigits, normalizeNdcOcr } from './ndc';
 import type { MedicationInput } from './types';
 
 export interface OcrResult {
   text: string;
+}
+
+export interface ParsedLabelText extends Partial<MedicationInput> {
+  ndc?: string;
+  rxNumber?: string;
 }
 
 const MAX_DIMENSION = 1600;
@@ -38,10 +43,10 @@ async function downscale(blob: Blob): Promise<Blob> {
   }
 }
 
-// The Rx# itself is read via the manual highlight-and-crop flow
+// The Rx# itself is also supported by the manual highlight-and-crop flow
 // (RxHighlightPicker), since that's far more accurate than guessing at it
-// from the whole photo. This pass only needs the full-label text for the
-// patterns that match reliably anywhere on the label: dose and frequency.
+// from the whole photo. This full-label pass still tries labeled Rx/NDC
+// patterns first when the printed words are visible.
 export async function recognizeLabelText(image: Blob): Promise<OcrResult> {
   const target = await downscale(image).catch(() => image);
   const result = await recognize(target, 'eng');
@@ -57,9 +62,14 @@ const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
 // candidate broad here and let the lookup layer validate legal segmentations.
 const NDC_LABELED_PATTERN = /\bN[D0O][C0O][:\s#-]*([\dOIlLSsBbQ][\dOIlLSsBbQ\s-]{8,15}[\dOIlLSsBbQ])\b/i;
 const NDC_SHAPE_PATTERN = /\b([\dOIlLSsBbQ]{4,6}[-\s]?[\dOIlLSsBbQ]{3,4}[-\s]?[\dOIlLSsBbQ]{1,2})\b/;
+const RX_LABELED_PATTERN = /\b(?:R\s?X|℞|PRESCRIPTION)\s*(?:#|NO\.?|NUMBER|NUM)?\s*[:#-]?\s*([\dOIlLSsBbQ][\dOIlLSsBbQ\s-]{3,15}[\dOIlLSsBbQ])\b/i;
 
-function normalizeOcrNdcCandidate(group: string): string {
+function normalizeOcrNumberCandidate(group: string): string {
   return normalizeNdcOcr(group).replace(/\s+/g, '-');
+}
+
+function normalizeRxCandidate(group: string): string {
+  return ndcDigits(normalizeNdcOcr(group));
 }
 
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
@@ -81,20 +91,22 @@ const FREQUENCY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 /**
- * Pulls the NDC, dose, and frequency out of the label text via plain regex
- * — all of these read reliably anywhere on a label. We deliberately do NOT
- * guess the drug name from OCR here — on real pharmacy labels the
- * patient's own name is often the largest, highest-confidence line, which
- * made font-size-based name guessing confidently wrong. The Rx# is read
- * separately via the manual highlight-and-crop flow, since it's not
- * reliably formatted/labeled enough to regex-match like the NDC is.
+ * Pulls the NDC, Rx number, dose, and frequency out of the label text via
+ * plain regex. Labeled patterns are preferred so a visible "Rx" or "NDC"
+ * tells the app which field the scanned number belongs to.
  */
-export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> & { ndc?: string } {
-  const result: Partial<MedicationInput> & { ndc?: string } = {};
+export function parseLabelText({ text }: OcrResult): ParsedLabelText {
+  const result: ParsedLabelText = {};
 
   const ndcMatch = text.match(NDC_LABELED_PATTERN) ?? text.match(NDC_SHAPE_PATTERN);
   if (ndcMatch) {
-    result.ndc = normalizeOcrNdcCandidate(ndcMatch[1]);
+    result.ndc = normalizeOcrNumberCandidate(ndcMatch[1]);
+  }
+
+  const rxMatch = text.match(RX_LABELED_PATTERN);
+  if (rxMatch) {
+    const rxNumber = normalizeRxCandidate(rxMatch[1]);
+    if (rxNumber.length >= 4) result.rxNumber = rxNumber;
   }
 
   const doseMatch = text.match(DOSE_PATTERN);
