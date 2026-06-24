@@ -1,4 +1,5 @@
 import { recognize } from 'tesseract.js';
+import { normalizeNdcOcr } from './ndc';
 import type { MedicationInput } from './types';
 
 export interface OcrResult {
@@ -50,21 +51,15 @@ export async function recognizeLabelText(image: Blob): Promise<OcrResult> {
 const DOSE_PATTERN = /\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/i;
 
 // The NDC (National Drug Code) is a standardized, publicly-lookupable
-// identifier — unlike the Rx#, which is pharmacy-internal. Printed as
-// 3 dash-separated digit groups, usually (but not always reliably, once
-// OCR'd) labeled "NDC". Print is tiny, so digits commonly get misread as
-// look-alike letters (O/0, I or l/1, S/5, B/8) — normalize those within a
-// candidate group before validating/returning it.
-const NDC_LABELED_PATTERN = /\bN[D0O][C0O][:\s#]*([\dOIlSB]{4,5}[-\s][\dOIlSB]{3,4}[-\s][\dOIlSB]{1,2})\b/i;
-const NDC_SHAPE_PATTERN = /\b([\dOIlSB]{4,5}-[\dOIlSB]{3,4}-[\dOIlSB]{1,2})\b/;
+// identifier — unlike the Rx#, which is pharmacy-internal. Printed NDCs may
+// have dashes, spaces, or no separators at all. OCR can also confuse tiny
+// NDC print with look-alike letters (O/0, I or l/1, S/5, B/8), so keep the
+// candidate broad here and let the lookup layer validate legal segmentations.
+const NDC_LABELED_PATTERN = /\bN[D0O][C0O][:\s#-]*([\dOIlLSsBbQ][\dOIlLSsBbQ\s-]{8,15}[\dOIlLSsBbQ])\b/i;
+const NDC_SHAPE_PATTERN = /\b([\dOIlLSsBbQ]{4,6}[-\s]?[\dOIlLSsBbQ]{3,4}[-\s]?[\dOIlLSsBbQ]{1,2})\b/;
 
-function normalizeOcrDigits(group: string): string {
-  return group
-    .replace(/[OoQ]/g, '0')
-    .replace(/[IilL]/g, '1')
-    .replace(/[Ss]/g, '5')
-    .replace(/[Bb]/g, '8')
-    .replace(/\s/g, '-');
+function normalizeOcrNdcCandidate(group: string): string {
+  return normalizeNdcOcr(group).replace(/\s+/g, '-');
 }
 
 // Common prescription "sig" abbreviations alongside plain-English phrasing.
@@ -99,7 +94,7 @@ export function parseLabelText({ text }: OcrResult): Partial<MedicationInput> & 
 
   const ndcMatch = text.match(NDC_LABELED_PATTERN) ?? text.match(NDC_SHAPE_PATTERN);
   if (ndcMatch) {
-    result.ndc = normalizeOcrDigits(ndcMatch[1]);
+    result.ndc = normalizeOcrNdcCandidate(ndcMatch[1]);
   }
 
   const doseMatch = text.match(DOSE_PATTERN);
