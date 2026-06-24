@@ -24,27 +24,33 @@ function normalizeOcrNumberText(text: string): string {
   return normalizeNdcOcr(text).replace(/[—–]/g, '-');
 }
 
-function extractNumber(text: string, mode: HighlightMode): string | null {
+function extractNdc(text: string): string | null {
   const normalized = normalizeOcrNumberText(text);
+  const labeled = normalized.match(/\bN[D0O][C0O][:\s#-]*([\d\s-]{10,16})\b/i);
+  const candidates = labeled ? [labeled[1]] : normalized.match(/[\d\s-]{10,16}/g) ?? [];
+  const plausible = candidates
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => {
+      const digitLength = ndcDigits(candidate).length;
+      return digitLength === 10 || digitLength === 11;
+    })
+    .sort((a, b) => ndcDigits(b).length - ndcDigits(a).length);
+  return plausible[0] ?? null;
+}
 
-  if (mode === 'ndc') {
-    const candidates = normalized.match(/[\d\s-]{10,16}/g) ?? [];
-    const plausible = candidates
-      .map((candidate) => candidate.trim())
-      .filter((candidate) => {
-        const digitLength = ndcDigits(candidate).length;
-        return digitLength === 10 || digitLength === 11;
-      })
-      .sort((a, b) => ndcDigits(b).length - ndcDigits(a).length);
-    return plausible[0] ?? null;
-  }
-
-  const candidates = normalized.match(/[\d\s-]{4,16}/g) ?? [];
+function extractRx(text: string): string | null {
+  const normalized = normalizeOcrNumberText(text);
+  const labeled = normalized.match(/\b(?:R\s?X|PRESCRIPTION)\s*(?:#|NO\.?|NUMBER|NUM)?\s*[:#-]?\s*([\d\s-]{4,16})\b/i);
+  const candidates = labeled ? [labeled[1]] : normalized.match(/[\d\s-]{4,16}/g) ?? [];
   const plausible = candidates
     .map((candidate) => ndcDigits(candidate))
     .filter((candidate) => candidate.length >= 4)
     .sort((a, b) => b.length - a.length);
   return plausible[0] ?? null;
+}
+
+function extractNumber(text: string, mode: HighlightMode): string | null {
+  return mode === 'ndc' ? extractNdc(text) : extractRx(text);
 }
 
 /**
@@ -136,7 +142,7 @@ export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCanc
       const result = await recognize(blob, 'eng');
       const number = extractNumber(result.data.text, mode);
       if (!number) {
-        setError(`Couldn't read a ${mode === 'ndc' ? 'valid NDC' : 'number'} in that area. Try selecting more tightly around just the digits.`);
+        setError(`Couldn't read a ${mode === 'ndc' ? 'valid NDC' : 'number'} in that area. Include the ${mode === 'ndc' ? 'NDC' : 'Rx'} label if it is nearby, or try selecting more tightly around the digits.`);
         return;
       }
       onResult(number);
@@ -152,7 +158,8 @@ export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCanc
   return (
     <div className="rx-picker">
       <p className="rx-picker-hint">
-        Drag the box around the {label}. The selection appears about an inch above your finger so you can see it.
+        Drag the box around the {label}. Include the printed {mode === 'ndc' ? 'NDC' : 'Rx'} label if it is close by.
+        The selection appears about an inch above your finger so you can see it.
       </p>
       {imageUrl && (
         <div
