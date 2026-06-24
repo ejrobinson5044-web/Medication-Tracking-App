@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { recognize } from 'tesseract.js';
+import { ndcDigits, normalizeNdcOcr } from '../lib/ndc';
 
 interface Box {
   x: number;
@@ -8,20 +9,51 @@ interface Box {
   h: number;
 }
 
+type HighlightMode = 'rx' | 'ndc';
+
 interface RxHighlightPickerProps {
   image: Blob;
-  onResult: (digits: string) => void;
+  mode?: HighlightMode;
+  onResult: (value: string) => void;
   onCancel: () => void;
 }
 
+const POINTER_Y_OFFSET = 54;
+
+function normalizeOcrNumberText(text: string): string {
+  return normalizeNdcOcr(text).replace(/[—–]/g, '-');
+}
+
+function extractNumber(text: string, mode: HighlightMode): string | null {
+  const normalized = normalizeOcrNumberText(text);
+
+  if (mode === 'ndc') {
+    const candidates = normalized.match(/[\d\s-]{10,16}/g) ?? [];
+    const plausible = candidates
+      .map((candidate) => candidate.trim())
+      .filter((candidate) => {
+        const digitLength = ndcDigits(candidate).length;
+        return digitLength === 10 || digitLength === 11;
+      })
+      .sort((a, b) => ndcDigits(b).length - ndcDigits(a).length);
+    return plausible[0] ?? null;
+  }
+
+  const candidates = normalized.match(/[\d\s-]{4,16}/g) ?? [];
+  const plausible = candidates
+    .map((candidate) => ndcDigits(candidate))
+    .filter((candidate) => candidate.length >= 4)
+    .sort((a, b) => b.length - a.length);
+  return plausible[0] ?? null;
+}
+
 /**
- * Lets the person drag a box around the Rx# on the photo themselves, since
+ * Lets the person drag a box around a number on the photo themselves, since
  * automatic detection of the highlighted area isn't reliable enough across
- * different phones/lighting. We crop tightly to exactly what they marked,
- * upscale it, and run OCR on just that, which reads far more accurately
- * than scanning the whole label.
+ * different phones/lighting. The selection point is offset above the finger
+ * so the user can see what they're marking while dragging.
  */
-export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighlightPickerProps) {
+export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCancel }: RxHighlightPickerProps) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [box, setBox] = useState<Box | null>(null);
   const [reading, setReading] = useState(false);
@@ -33,19 +65,22 @@ export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighl
   useEffect(() => {
     const url = URL.createObjectURL(image);
     setImageUrl(url);
+    setBox(null);
+    setError(null);
     return () => URL.revokeObjectURL(url);
-  }, [image]);
+  }, [image, mode]);
 
   function pointFromEvent(e: React.PointerEvent): { x: number; y: number } {
     const rect = containerRef.current!.getBoundingClientRect();
     return {
       x: Math.min(Math.max(e.clientX - rect.left, 0), rect.width),
-      y: Math.min(Math.max(e.clientY - rect.top, 0), rect.height),
+      y: Math.min(Math.max(e.clientY - rect.top - POINTER_Y_OFFSET, 0), rect.height),
     };
   }
 
   function handlePointerDown(e: React.PointerEvent) {
     e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     const p = pointFromEvent(e);
     dragStart.current = p;
     setBox({ x: p.x, y: p.y, w: 0, h: 0 });
@@ -64,15 +99,16 @@ export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighl
     });
   }
 
-  function handlePointerUp() {
+  function handlePointerUp(e: React.PointerEvent) {
     dragStart.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
   }
 
   async function handleReadSelection() {
     const img = imgRef.current;
     const container = containerRef.current;
     if (!img || !container || !box || box.w < 8 || box.h < 8) {
-      setError('Drag a box around the Rx number first.');
+      setError(`Drag a box around the ${mode === 'ndc' ? 'NDC' : 'Rx number'} first.`);
       return;
     }
     setError(null);
@@ -91,23 +127,19 @@ export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighl
       canvas.height = cropH * upscale;
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('no canvas context');
+      ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
 
       const blob: Blob | null = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
       if (!blob) throw new Error('crop failed');
 
       const result = await recognize(blob, 'eng');
-      const digitGroups = result.data.text.match(/\d{4,10}/g) ?? [];
-      if (digitGroups.length === 0) {
-        setError("Couldn't read a number in that area. Try selecting more tightly around just the digits.");
+      const number = extractNumber(result.data.text, mode);
+      if (!number) {
+        setError(`Couldn't read a ${mode === 'ndc' ? 'valid NDC' : 'number'} in that area. Try selecting more tightly around just the digits.`);
         return;
       }
-      const [longest] = digitGroups.sort((a, b) => b.length - a.length);
-      if (!longest) {
-        setError("Couldn't read a number in that area. Try selecting more tightly around just the digits.");
-        return;
-      }
-      onResult(longest);
+      onResult(number);
     } catch {
       setError('Reading that selection failed. Try again.');
     } finally {
@@ -115,9 +147,13 @@ export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighl
     }
   }
 
+  const label = mode === 'ndc' ? 'NDC' : 'Rx number';
+
   return (
     <div className="rx-picker">
-      <p className="rx-picker-hint">Drag a box tightly around the Rx number, then tap "Read selection".</p>
+      <p className="rx-picker-hint">
+        Drag the box around the {label}. The selection appears about an inch above your finger so you can see it.
+      </p>
       {imageUrl && (
         <div
           ref={containerRef}
@@ -125,6 +161,7 @@ export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighl
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
         >
           <img ref={imgRef} src={imageUrl} alt="Scanned label" draggable={false} />
           {box && (
@@ -141,7 +178,7 @@ export default function RxHighlightPicker({ image, onResult, onCancel }: RxHighl
           Cancel
         </button>
         <button type="button" className="primary-button" onClick={() => void handleReadSelection()} disabled={reading}>
-          {reading ? 'Reading…' : 'Read selection'}
+          {reading ? 'Reading…' : `Read ${label}`}
         </button>
       </div>
     </div>
