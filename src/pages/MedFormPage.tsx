@@ -4,7 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { medicationsStore, rxLookupStore } from '../lib/db';
 import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
-import { lookupNdc } from '../lib/ndcLookup';
+import { lookupNdcCandidates, type NdcLookupResult } from '../lib/ndcLookup';
 import { searchDrugNames, parseDrugDisplayName } from '../lib/drugSearch';
 import RxHighlightPicker from '../components/RxHighlightPicker';
 import {
@@ -65,6 +65,7 @@ export default function MedFormPage() {
   const [scanInfo, setScanInfo] = useState<string | null>(null);
   const [pendingImage, setPendingImage] = useState<Blob | null>(null);
   const [rxCandidates, setRxCandidates] = useState<RxLookupEntry[]>([]);
+  const [ndcCandidates, setNdcCandidates] = useState<NdcLookupResult[]>([]);
   const [extractedRxNumber, setExtractedRxNumber] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [nameSuggestions, setNameSuggestions] = useState<string[]>([]);
@@ -124,24 +125,40 @@ export default function MedFormPage() {
 
   async function applyNdcLookup(ndc: string) {
     setNdcLooking(true);
+    setNdcCandidates([]);
     try {
-      const ndcResult = await lookupNdc(ndc);
-      if (ndcResult) {
-        setForm((prev) => ({
-          ...prev,
-          name: prev.name || ndcResult.name,
-          brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
-          amount: prev.amount || ndcResult.amount || prev.amount,
-        }));
-        setScanInfo(
-          ndcResult.brandOrCommonName
-            ? `Identified from NDC: ${ndcResult.name} (${ndcResult.brandOrCommonName}).`
-            : `Identified from NDC: ${ndcResult.name}.`,
-        );
+      const results = await lookupNdcCandidates(ndc);
+      if (results.length === 0) {
+        setScanInfo(`NDC read as ${ndc}, but no matching medication was found.`);
+        return;
       }
+
+      if (results.length === 1) {
+        applyNdcMatch(results[0]);
+        return;
+      }
+
+      setNdcCandidates(results);
+      setScanInfo(`NDC read as ${ndc}. Pick the matching medication below.`);
     } finally {
       setNdcLooking(false);
     }
+  }
+
+  function applyNdcMatch(ndcResult: NdcLookupResult) {
+    setForm((prev) => ({
+      ...prev,
+      ndc: ndcResult.ndc,
+      name: prev.name || ndcResult.name,
+      brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
+      amount: prev.amount || ndcResult.amount || prev.amount,
+    }));
+    setNdcCandidates([]);
+    setScanInfo(
+      ndcResult.brandOrCommonName
+        ? `Identified from NDC: ${ndcResult.name} (${ndcResult.brandOrCommonName}).`
+        : `Identified from NDC: ${ndcResult.name}.`,
+    );
   }
 
   function handleNdcBlur() {
@@ -179,6 +196,7 @@ export default function MedFormPage() {
     setScanError(null);
     setScanInfo(null);
     setRxCandidates([]);
+    setNdcCandidates([]);
     setExtractedRxNumber(null);
     setPendingImage(file);
 
@@ -243,6 +261,7 @@ export default function MedFormPage() {
     setScanInfo(`Matched to a saved prescription — filled in ${entry.name}.`);
     setPendingImage(null);
     setRxCandidates([]);
+    setNdcCandidates([]);
     setExtractedRxNumber(null);
   }
 
@@ -257,12 +276,14 @@ export default function MedFormPage() {
     }
     setPendingImage(null);
     setRxCandidates([]);
+    setNdcCandidates([]);
     setExtractedRxNumber(null);
   }
 
   function cancelScan() {
     setPendingImage(null);
     setRxCandidates([]);
+    setNdcCandidates([]);
     setExtractedRxNumber(null);
   }
 
@@ -329,7 +350,27 @@ export default function MedFormPage() {
         {scanError && <p className="login-error">{scanError}</p>}
         {scanInfo && <p className="login-info">{scanInfo}</p>}
 
-        {pendingImage && rxCandidates.length === 0 && (
+        {ndcCandidates.length > 0 && (
+          <div className="rx-picker">
+            <p className="rx-picker-hint">Multiple medications matched that NDC pattern:</p>
+            <ul className="rx-candidate-list">
+              {ndcCandidates.map((candidate) => (
+                <li key={`${candidate.ndc}-${candidate.name}-${candidate.amount ?? ''}`}>
+                  <button type="button" onClick={() => applyNdcMatch(candidate)}>
+                    {candidate.name}
+                    <span className="rx-candidate-meta">
+                      NDC {candidate.ndc}
+                      {candidate.brandOrCommonName ? ` • ${candidate.brandOrCommonName}` : ''}
+                      {candidate.amount ? ` • ${candidate.amount}` : ''}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {pendingImage && rxCandidates.length === 0 && ndcCandidates.length === 0 && (
           <RxHighlightPicker
             image={pendingImage}
             onResult={(digits) => void handleRxHighlightResult(digits)}
@@ -368,7 +409,7 @@ export default function MedFormPage() {
             value={form.ndc}
             onChange={(e) => setForm({ ...form, ndc: e.target.value })}
             onBlur={handleNdcBlur}
-            placeholder="e.g. 00074-3368-13"
+            placeholder="e.g. 00074-3368-13 or 00074336813"
           />
           {ndcLooking && <span className="login-info">Looking up…</span>}
         </label>
