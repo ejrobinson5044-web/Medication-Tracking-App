@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuid } from 'uuid';
 import { medicationsStore, rxLookupStore } from '../lib/db';
-import { suggestTimesOfDay } from '../lib/frequency';
 import { recognizeLabelText, parseLabelText } from '../lib/ocr';
 import { lookupNdcCandidates, type NdcLookupResult } from '../lib/ndcLookup';
 import { searchDrugNames, parseDrugDisplayName } from '../lib/drugSearch';
+import { readBarcodeTexts } from '../lib/barcode';
+import { ndcDigits, normalizeNdcOcr } from '../lib/ndc';
 import RxHighlightPicker from '../components/RxHighlightPicker';
 import {
   TIMES_OF_DAY,
@@ -15,6 +16,8 @@ import {
   type RxLookupEntry,
   type TimeOfDay,
 } from '../lib/types';
+
+type HighlightMode = 'rx' | 'ndc';
 
 function levenshtein(a: string, b: string): number {
   const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
@@ -42,6 +45,47 @@ function findRxCandidates(digits: string, entries: RxLookupEntry[]): RxLookupEnt
     .map(({ entry }) => entry);
 }
 
+function frequencyFromTimes(times: TimeOfDay[]): string {
+  switch (times.length) {
+    case 0:
+      return '';
+    case 1:
+      return 'Once daily';
+    case 2:
+      return 'Twice daily';
+    case 3:
+      return 'Three times daily';
+    case 4:
+      return 'Four times daily';
+    default:
+      return `${times.length} times daily`;
+  }
+}
+
+function extractLikelyNdcFromText(text: string): string | null {
+  const normalized = normalizeNdcOcr(text);
+  const candidates = normalized.match(/[\d\s-]{10,16}/g) ?? [];
+  return (
+    candidates.find((candidate) => {
+      const length = ndcDigits(candidate).length;
+      return length === 10 || length === 11;
+    }) ?? null
+  );
+}
+
+function extractLikelyRxFromText(text: string): string | null {
+  const normalized = normalizeNdcOcr(text);
+  const labeled = normalized.match(/\bR\s?X\s?#?[:\s-]*([\d\s-]{4,16})/i);
+  if (labeled) return ndcDigits(labeled[1]);
+
+  const candidates = normalized.match(/[\d\s-]{6,16}/g) ?? [];
+  const digitGroups = candidates
+    .map((candidate) => ndcDigits(candidate))
+    .filter((candidate) => candidate.length >= 6)
+    .sort((a, b) => b.length - a.length);
+  return digitGroups[0] ?? null;
+}
+
 const emptyForm: MedicationInput = {
   name: '',
   brandOrCommonName: '',
@@ -64,6 +108,7 @@ export default function MedFormPage() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanInfo, setScanInfo] = useState<string | null>(null);
   const [pendingImage, setPendingImage] = useState<Blob | null>(null);
+  const [highlightMode, setHighlightMode] = useState<HighlightMode | null>(null);
   const [rxCandidates, setRxCandidates] = useState<RxLookupEntry[]>([]);
   const [ndcCandidates, setNdcCandidates] = useState<NdcLookupResult[]>([]);
   const [extractedRxNumber, setExtractedRxNumber] = useState<string | null>(null);
@@ -153,6 +198,7 @@ export default function MedFormPage() {
       brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
       amount: prev.amount || ndcResult.amount || prev.amount,
     }));
+    setHighlightMode(null);
     setNdcCandidates([]);
     setScanInfo(
       ndcResult.brandOrCommonName
@@ -167,25 +213,16 @@ export default function MedFormPage() {
   }
 
   function toggleTime(tod: TimeOfDay) {
-    setForm((prev) => ({
-      ...prev,
-      timesOfDay: prev.timesOfDay.includes(tod)
+    setForm((prev) => {
+      const timesOfDay = prev.timesOfDay.includes(tod)
         ? prev.timesOfDay.filter((t) => t !== tod)
-        : [...prev.timesOfDay, tod],
-    }));
-  }
-
-  function applySuggestedTimes() {
-    const suggested = suggestTimesOfDay(form.frequency);
-    if (suggested.length > 0) {
-      setForm((prev) => ({ ...prev, timesOfDay: suggested }));
-    }
-  }
-
-  function handleFrequencyBlur() {
-    if (form.timesOfDay.length === 0) {
-      applySuggestedTimes();
-    }
+        : [...prev.timesOfDay, tod];
+      return {
+        ...prev,
+        timesOfDay,
+        frequency: frequencyFromTimes(timesOfDay),
+      };
+    });
   }
 
   async function handleScanFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -197,16 +234,39 @@ export default function MedFormPage() {
     setScanInfo(null);
     setRxCandidates([]);
     setNdcCandidates([]);
+    setHighlightMode(null);
     setExtractedRxNumber(null);
     setPendingImage(file);
 
-    // Dose/frequency are matched with plain regex and read reliably off the
-    // whole photo, so fill those in the background while the person
-    // highlights the Rx# themselves below. The NDC, if present, is a real
-    // public identifier, so it can resolve the drug name automatically —
-    // unlike the Rx#, which only means something to the filling pharmacy.
+    // BarcodeDetector can read the QR/data-matrix/barcode on many mobile
+    // browsers. If Walgreens encodes NDC/Rx/label text in that code, use it;
+    // otherwise fall back to OCR and manual selection.
     setScanning(true);
     try {
+      const barcodeTexts = await readBarcodeTexts(file);
+      if (barcodeTexts.length > 0) {
+        const barcodeText = barcodeTexts.join('\n');
+        const parsedBarcode = parseLabelText({ text: barcodeText });
+        const barcodeNdc = parsedBarcode.ndc ?? extractLikelyNdcFromText(barcodeText);
+        const barcodeRx = extractLikelyRxFromText(barcodeText);
+
+        setForm((prev) => ({
+          ...prev,
+          ndc: prev.ndc || barcodeNdc || prev.ndc,
+          rxNumber: prev.rxNumber || barcodeRx || prev.rxNumber,
+          amount: prev.amount || parsedBarcode.amount || prev.amount,
+          frequency: prev.frequency || parsedBarcode.frequency || prev.frequency,
+        }));
+
+        if (barcodeNdc) {
+          await applyNdcLookup(barcodeNdc);
+        } else if (barcodeRx) {
+          setScanInfo('Read a barcode/QR code and filled the Rx number. Add the medication name once if this is a new prescription.');
+        } else {
+          setScanInfo('Read a barcode/QR code, but it did not expose a usable NDC or Rx number. Try manual NDC or Rx selection below.');
+        }
+      }
+
       const ocrResult = await recognizeLabelText(file);
       const parsed = parseLabelText(ocrResult);
       setForm((prev) => ({
@@ -220,13 +280,20 @@ export default function MedFormPage() {
         await applyNdcLookup(parsed.ndc);
       }
     } catch {
-      // Non-fatal — the Rx highlight step below is the primary path.
+      setScanError('The automatic scan had trouble. Try manual NDC or Rx selection below.');
     } finally {
       setScanning(false);
     }
   }
 
+  async function handleNdcHighlightResult(value: string) {
+    setHighlightMode(null);
+    setForm((prev) => ({ ...prev, ndc: value }));
+    await applyNdcLookup(value);
+  }
+
   async function handleRxHighlightResult(digits: string) {
+    setHighlightMode(null);
     setExtractedRxNumber(digits);
     const known = await rxLookupStore.get(digits);
     if (known) {
@@ -242,7 +309,6 @@ export default function MedFormPage() {
           ? `Rx# saved — we'll remember it's ${form.name} for refills.`
           : "New prescription — enter the medication name once below and we'll remember it for refills.",
       );
-      setPendingImage(null);
       return;
     }
     setRxCandidates(candidates);
@@ -260,6 +326,7 @@ export default function MedFormPage() {
     }));
     setScanInfo(`Matched to a saved prescription — filled in ${entry.name}.`);
     setPendingImage(null);
+    setHighlightMode(null);
     setRxCandidates([]);
     setNdcCandidates([]);
     setExtractedRxNumber(null);
@@ -275,6 +342,7 @@ export default function MedFormPage() {
       );
     }
     setPendingImage(null);
+    setHighlightMode(null);
     setRxCandidates([]);
     setNdcCandidates([]);
     setExtractedRxNumber(null);
@@ -282,6 +350,7 @@ export default function MedFormPage() {
 
   function cancelScan() {
     setPendingImage(null);
+    setHighlightMode(null);
     setRxCandidates([]);
     setNdcCandidates([]);
     setExtractedRxNumber(null);
@@ -345,7 +414,7 @@ export default function MedFormPage() {
           onClick={() => fileInputRef.current?.click()}
           disabled={scanning}
         >
-          {scanning ? 'Reading label…' : '📷 Scan a label or upload a photo'}
+          {scanning ? 'Reading label + QR…' : '📷 Scan label, QR, or upload photo'}
         </button>
         {scanError && <p className="login-error">{scanError}</p>}
         {scanInfo && <p className="login-info">{scanInfo}</p>}
@@ -370,11 +439,29 @@ export default function MedFormPage() {
           </div>
         )}
 
-        {pendingImage && rxCandidates.length === 0 && ndcCandidates.length === 0 && (
+        {pendingImage && !highlightMode && rxCandidates.length === 0 && ndcCandidates.length === 0 && (
+          <div className="rx-picker">
+            <p className="rx-picker-hint">Need a tighter read? Select which number you want to drag around.</p>
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={() => setHighlightMode('ndc')}>
+                Drag NDC
+              </button>
+              <button type="button" className="secondary-button" onClick={() => setHighlightMode('rx')}>
+                Drag Rx #
+              </button>
+              <button type="button" className="secondary-button" onClick={cancelScan}>
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
+        {pendingImage && highlightMode && (
           <RxHighlightPicker
             image={pendingImage}
-            onResult={(digits) => void handleRxHighlightResult(digits)}
-            onCancel={cancelScan}
+            mode={highlightMode}
+            onResult={(value) => void (highlightMode === 'ndc' ? handleNdcHighlightResult(value) : handleRxHighlightResult(value))}
+            onCancel={() => setHighlightMode(null)}
           />
         )}
 
@@ -451,7 +538,7 @@ export default function MedFormPage() {
           Rx # (prescription number)
           <input
             value={form.rxNumber}
-            onChange={(e) => setForm({ ...form, rxNumber: e.target.value })}
+            onChange={(e) => setForm({ ...form, rxNumber: ndcDigits(e.target.value) })}
             placeholder="e.g. 1234567"
           />
         </label>
@@ -466,23 +553,10 @@ export default function MedFormPage() {
           />
         </label>
 
-        <label>
-          Frequency
-          <input
-            required
-            value={form.frequency}
-            onChange={(e) => setForm({ ...form, frequency: e.target.value })}
-            onBlur={handleFrequencyBlur}
-            placeholder="e.g. Twice daily"
-          />
-        </label>
-
         <fieldset className="time-of-day-picker">
           <div className="time-of-day-header">
             <legend>Time(s) of day</legend>
-            <button type="button" className="text-link" onClick={applySuggestedTimes}>
-              Suggest from frequency
-            </button>
+            <span className="rx-candidate-meta">Frequency fills from this</span>
           </div>
           {TIMES_OF_DAY.map((tod) => (
             <label key={tod} className="checkbox-pill">
@@ -495,6 +569,16 @@ export default function MedFormPage() {
             </label>
           ))}
         </fieldset>
+
+        <label>
+          Frequency
+          <input
+            required
+            value={form.frequency}
+            onChange={(e) => setForm({ ...form, frequency: e.target.value })}
+            placeholder="e.g. Twice daily"
+          />
+        </label>
 
         <label>
           Notes
