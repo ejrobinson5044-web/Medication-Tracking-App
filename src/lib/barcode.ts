@@ -14,9 +14,13 @@ const BARCODE_FORMATS = [
   'code_39',
   'ean_13',
   'ean_8',
-  'upc_a',
-  'upc_e',
 ];
+
+function uniqueRawValues(results: DetectedBarcode[]): string[] {
+  return results
+    .map((result) => result.rawValue?.trim() ?? '')
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+}
 
 /**
  * Reads QR/barcode text from the photo when the browser supports the native
@@ -30,11 +34,14 @@ export async function readBarcodeTexts(image: Blob): Promise<string[]> {
   let bitmap: ImageBitmap | null = null;
   try {
     bitmap = await createImageBitmap(image);
-    const detector = new Detector({ formats: BARCODE_FORMATS });
-    const results = await detector.detect(bitmap);
-    return results
-      .map((result) => result.rawValue?.trim() ?? '')
-      .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+
+    try {
+      const detector = new Detector({ formats: BARCODE_FORMATS });
+      return uniqueRawValues(await detector.detect(bitmap));
+    } catch {
+      const detector = new Detector();
+      return uniqueRawValues(await detector.detect(bitmap));
+    }
   } catch {
     return [];
   } finally {
