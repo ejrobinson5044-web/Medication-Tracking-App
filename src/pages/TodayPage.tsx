@@ -7,6 +7,12 @@ import { generateIcs, downloadIcs } from '../lib/ics';
 import { checkInteractions } from '../lib/interactions';
 import InteractionWarnings from '../components/InteractionWarnings';
 
+interface ScheduledDose {
+  med: Medication;
+  timeOfDay: TimeOfDay;
+  log?: DoseLog;
+}
+
 export default function TodayPage() {
   const [meds, setMeds] = useState<Medication[]>([]);
   const [logs, setLogs] = useState<DoseLog[]>([]);
@@ -25,30 +31,45 @@ export default function TodayPage() {
     setLoading(false);
   }
 
-  const grouped = useMemo(() => {
-    const map = new Map<TimeOfDay, Medication[]>();
-    for (const tod of TIMES_OF_DAY) map.set(tod, []);
-    for (const med of meds) {
-      for (const tod of med.timesOfDay) {
-        map.get(tod)!.push(med);
-      }
-    }
-    return map;
-  }, [meds]);
-
-  const interactionWarnings = useMemo(() => checkInteractions(meds), [meds]);
-
-  const totalDoses = meds.reduce((sum, m) => sum + m.timesOfDay.length, 0);
-  const takenCount = logs.filter((l) => l.taken).length;
-  const remaining = totalDoses - takenCount;
-
   function getLog(medId: string, tod: TimeOfDay): DoseLog | undefined {
     return logs.find((l) => l.medId === medId && l.timeOfDay === tod);
   }
 
-  async function toggleDose(medId: string, tod: TimeOfDay) {
+  const grouped = useMemo(() => {
+    const map = new Map<TimeOfDay, ScheduledDose[]>();
+    for (const tod of TIMES_OF_DAY) map.set(tod, []);
+    for (const med of meds) {
+      for (const tod of med.timesOfDay) {
+        const log = getLog(med.id, tod);
+        if (!(log?.taken ?? false)) {
+          map.get(tod)!.push({ med, timeOfDay: tod, log });
+        }
+      }
+    }
+    return map;
+  }, [meds, logs]);
+
+  const takenDoses = useMemo(() => {
+    const doses: ScheduledDose[] = [];
+    for (const med of meds) {
+      for (const tod of med.timesOfDay) {
+        const log = getLog(med.id, tod);
+        if (log?.taken) {
+          doses.push({ med, timeOfDay: tod, log });
+        }
+      }
+    }
+    return doses.sort((a, b) => (a.log?.takenAt ?? '').localeCompare(b.log?.takenAt ?? ''));
+  }, [meds, logs]);
+
+  const interactionWarnings = useMemo(() => checkInteractions(meds), [meds]);
+
+  const totalDoses = meds.reduce((sum, m) => sum + m.timesOfDay.length, 0);
+  const takenCount = takenDoses.length;
+  const remaining = totalDoses - takenCount;
+
+  async function setDoseTaken(medId: string, tod: TimeOfDay, taken: boolean) {
     const existing = getLog(medId, tod);
-    const taken = !(existing?.taken ?? false);
     const log: DoseLog = {
       id: existing?.id ?? uuid(),
       medId,
@@ -64,9 +85,39 @@ export default function TodayPage() {
     });
   }
 
+  async function handleDoseClick(dose: ScheduledDose, taken: boolean) {
+    if (!taken) {
+      await setDoseTaken(dose.med.id, dose.timeOfDay, true);
+      return;
+    }
+
+    const confirmed = window.confirm(`Mark ${dose.med.name} as not taken for ${TIME_OF_DAY_LABELS[dose.timeOfDay]}?`);
+    if (!confirmed) return;
+    await setDoseTaken(dose.med.id, dose.timeOfDay, false);
+  }
+
   function handleExport() {
     const ics = generateIcs(meds);
     downloadIcs(ics);
+  }
+
+  function renderDose(dose: ScheduledDose, taken: boolean) {
+    return (
+      <li key={`${dose.med.id}-${dose.timeOfDay}`} className={`dose-item ${taken ? 'taken' : ''}`}>
+        <button className="dose-toggle" onClick={() => void handleDoseClick(dose, taken)}>
+          <span className="checkbox" aria-hidden="true">
+            {taken ? '✓' : ''}
+          </span>
+          <span className="dose-info">
+            <span className="dose-name">{dose.med.name}</span>
+            <span className="dose-meta">
+              {dose.med.amount}
+              {taken ? ` • ${TIME_OF_DAY_LABELS[dose.timeOfDay]}` : ''}
+            </span>
+          </span>
+        </button>
+      </li>
+    );
   }
 
   if (loading) return <div className="page-loading">Loading...</div>;
@@ -85,34 +136,25 @@ export default function TodayPage() {
       {meds.length === 0 ? (
         <p className="empty-state">No medications yet. Add one from the Medications tab.</p>
       ) : (
-        TIMES_OF_DAY.map((tod) => {
-          const items = grouped.get(tod) ?? [];
-          if (items.length === 0) return null;
-          return (
-            <section key={tod} className="time-group">
-              <h2>{TIME_OF_DAY_LABELS[tod]}</h2>
-              <ul className="dose-list">
-                {items.map((med) => {
-                  const log = getLog(med.id, tod);
-                  const taken = log?.taken ?? false;
-                  return (
-                    <li key={med.id} className={`dose-item ${taken ? 'taken' : ''}`}>
-                      <button className="dose-toggle" onClick={() => toggleDose(med.id, tod)}>
-                        <span className="checkbox" aria-hidden="true">
-                          {taken ? '✓' : ''}
-                        </span>
-                        <span className="dose-info">
-                          <span className="dose-name">{med.name}</span>
-                          <span className="dose-meta">{med.amount}</span>
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
+        <>
+          {TIMES_OF_DAY.map((tod) => {
+            const items = grouped.get(tod) ?? [];
+            if (items.length === 0) return null;
+            return (
+              <section key={tod} className="time-group">
+                <h2>{TIME_OF_DAY_LABELS[tod]}</h2>
+                <ul className="dose-list">{items.map((dose) => renderDose(dose, false))}</ul>
+              </section>
+            );
+          })}
+
+          {takenDoses.length > 0 && (
+            <section className="time-group taken-group">
+              <h2>Taken</h2>
+              <ul className="dose-list">{takenDoses.map((dose) => renderDose(dose, true))}</ul>
             </section>
-          );
-        })
+          )}
+        </>
       )}
 
       {meds.length > 0 && (
