@@ -3,18 +3,35 @@ export interface PdfScanInput {
   pageImages: Blob[];
 }
 
+type PdfJsModule = {
+  GlobalWorkerOptions: { workerSrc: string };
+  getDocument: (options: { data: ArrayBuffer }) => { promise: Promise<PdfDocument> };
+};
+
+type PdfDocument = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<PdfPage>;
+};
+
+type PdfPage = {
+  getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
+  getViewport: (options: { scale: number }) => { width: number; height: number };
+  render: (options: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => {
+    promise: Promise<void>;
+  };
+};
+
+const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.mjs';
+const PDFJS_WORKER_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
+
+async function loadPdfJs(): Promise<PdfJsModule> {
+  const pdfjsLib = (await import(/* @vite-ignore */ PDFJS_URL)) as PdfJsModule;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+  return pdfjsLib;
+}
+
 export async function extractPdfScanInput(file: File, maxPages = 10): Promise<PdfScanInput> {
-  const pdfjsLib = await import('pdfjs-dist');
-
-  try {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      'pdfjs-dist/build/pdf.worker.min.mjs',
-      import.meta.url,
-    ).toString();
-  } catch {
-    // Ignore worker setup failures and let pdf.js use its fallback behavior.
-  }
-
+  const pdfjsLib = await loadPdfJs();
   const data = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data }).promise;
   const pageTexts: string[] = [];
@@ -26,7 +43,7 @@ export async function extractPdfScanInput(file: File, maxPages = 10): Promise<Pd
 
     const content = await page.getTextContent();
     const text = content.items
-      .map((item) => ('str' in item ? item.str : ''))
+      .map((item) => item.str ?? '')
       .join(' ')
       .replace(/\s+/g, ' ')
       .trim();
