@@ -273,8 +273,8 @@ export default function MedFormPage() {
 
   function handleImageTarget(target: ImageScanTarget) {
     const input = scanSource === 'camera' ? cameraInputRef.current : imageInputRef.current;
-    input?.click();
     input?.setAttribute('data-target', target);
+    input?.click();
   }
 
   async function handleImageFile(e: React.ChangeEvent<HTMLInputElement>) {
