@@ -7,6 +7,8 @@ import { lookupNdcCandidates, type NdcLookupResult } from '../lib/ndcLookup';
 import { searchDrugNames, parseDrugDisplayName } from '../lib/drugSearch';
 import { readBarcodeTexts } from '../lib/barcode';
 import { ndcDigits, normalizeNdcOcr } from '../lib/ndc';
+import { extractPdfScanInput } from '../lib/pdf';
+import { parseMedicationListText } from '../lib/medListParser';
 import RxHighlightPicker from '../components/RxHighlightPicker';
 import {
   TIMES_OF_DAY,
@@ -18,6 +20,8 @@ import {
 } from '../lib/types';
 
 type HighlightMode = 'rx' | 'ndc';
+type ScanSource = 'camera' | 'imageUpload' | null;
+type ImageScanTarget = 'wholeLabel' | 'barcode' | 'numbers';
 
 function levenshtein(a: string, b: string): number {
   const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
@@ -34,8 +38,6 @@ function levenshtein(a: string, b: string): number {
   return dp[a.length][b.length];
 }
 
-/** Surfaces close matches (not just exact) since a hand-cropped OCR read of
- * a single digit string can easily be off by a digit or two. */
 function findRxCandidates(digits: string, entries: RxLookupEntry[]): RxLookupEntry[] {
   return entries
     .map((entry) => ({ entry, distance: levenshtein(digits, entry.rxNumber) }))
@@ -110,10 +112,13 @@ export default function MedFormPage() {
   const [scanInfo, setScanInfo] = useState<string | null>(null);
   const [pendingImage, setPendingImage] = useState<Blob | null>(null);
   const [highlightMode, setHighlightMode] = useState<HighlightMode | null>(null);
+  const [scanSource, setScanSource] = useState<ScanSource>(null);
   const [rxCandidates, setRxCandidates] = useState<RxLookupEntry[]>([]);
   const [ndcCandidates, setNdcCandidates] = useState<NdcLookupResult[]>([]);
   const [extractedRxNumber, setExtractedRxNumber] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
   const [nameSuggestions, setNameSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const suppressNextLookup = useRef(false);
@@ -156,6 +161,15 @@ export default function MedFormPage() {
     }, 300);
     return () => clearTimeout(timer);
   }, [form.name]);
+
+  function resetScanState() {
+    setScanError(null);
+    setScanInfo(null);
+    setRxCandidates([]);
+    setNdcCandidates([]);
+    setHighlightMode(null);
+    setExtractedRxNumber(null);
+  }
 
   function selectNameSuggestion(raw: string) {
     suppressNextLookup.current = true;
@@ -208,6 +222,26 @@ export default function MedFormPage() {
     );
   }
 
+  async function applyParsedText(text: string, sourceLabel: string) {
+    const parsed = parseLabelText({ text });
+    const ndc = parsed.ndc ?? extractLikelyNdcFromText(text);
+    const rxNumber = parsed.rxNumber ?? extractLikelyRxFromText(text);
+
+    setForm((prev) => ({
+      ...prev,
+      ndc: prev.ndc || ndc || prev.ndc,
+      rxNumber: prev.rxNumber || rxNumber || prev.rxNumber,
+      amount: prev.amount || parsed.amount || prev.amount,
+      frequency: prev.frequency || parsed.frequency || prev.frequency,
+    }));
+
+    if (ndc) await applyNdcLookup(ndc);
+    if (rxNumber) await handleRxHighlightResult(rxNumber);
+    if (!ndc && !rxNumber && !parsed.amount && !parsed.frequency) {
+      setScanInfo(`${sourceLabel} was read, but no usable NDC, Rx number, dose, or frequency was found.`);
+    }
+  }
+
   function handleNdcBlur() {
     const ndc = form.ndc?.trim();
     if (ndc) void applyNdcLookup(ndc);
@@ -226,68 +260,118 @@ export default function MedFormPage() {
     });
   }
 
-  async function handleScanFile(e: React.ChangeEvent<HTMLInputElement>) {
+  function handleSource(source: NonNullable<ScanSource> | 'pdfUpload') {
+    resetScanState();
+    setPendingImage(null);
+    if (source === 'pdfUpload') {
+      setScanSource(null);
+      pdfInputRef.current?.click();
+      return;
+    }
+    setScanSource(source);
+  }
+
+  function handleImageTarget(target: ImageScanTarget) {
+    const input = scanSource === 'camera' ? cameraInputRef.current : imageInputRef.current;
+    input?.click();
+    input?.setAttribute('data-target', target);
+  }
+
+  async function handleImageFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    const target = (e.target.getAttribute('data-target') as ImageScanTarget | null) ?? 'wholeLabel';
+    e.target.value = '';
+    if (!file) return;
+    await processImageFile(file, target);
+  }
+
+  async function processImageFile(file: File | Blob, target: ImageScanTarget) {
+    resetScanState();
+    setPendingImage(file);
+    setScanning(true);
+    try {
+      if (target === 'barcode' || target === 'wholeLabel') {
+        const barcodeTexts = await readBarcodeTexts(file);
+        if (barcodeTexts.length > 0) {
+          await applyParsedText(barcodeTexts.join('\n'), 'Barcode/QR code');
+          if (target === 'barcode') return;
+        } else if (target === 'barcode') {
+          setScanInfo('No readable barcode or QR code was found. Try a closer, sharper photo or use NDC/Rx number mode.');
+          return;
+        }
+      }
+
+      if (target === 'numbers' || target === 'wholeLabel') {
+        const ocrResult = await recognizeLabelText(file);
+        await applyParsedText(ocrResult.text, target === 'numbers' ? 'NDC/Rx number image' : 'Label image');
+      }
+    } catch {
+      setScanError('The scan had trouble. Try another scan mode or use manual NDC/Rx selection below.');
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function handlePdfFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
-    setScanError(null);
-    setScanInfo(null);
-    setRxCandidates([]);
-    setNdcCandidates([]);
-    setHighlightMode(null);
-    setExtractedRxNumber(null);
-    setPendingImage(file);
-
-    // BarcodeDetector can read the QR/data-matrix/barcode on many mobile
-    // browsers. If Walgreens encodes NDC/Rx/label text in that code, use it;
-    // otherwise fall back to OCR and manual selection.
+    resetScanState();
+    setPendingImage(null);
     setScanning(true);
     try {
-      const barcodeTexts = await readBarcodeTexts(file);
-      if (barcodeTexts.length > 0) {
-        const barcodeText = barcodeTexts.join('\n');
-        const parsedBarcode = parseLabelText({ text: barcodeText });
-        const barcodeNdc = parsedBarcode.ndc ?? extractLikelyNdcFromText(barcodeText);
-        const barcodeRx = parsedBarcode.rxNumber ?? extractLikelyRxFromText(barcodeText);
+      const pdfInput = await extractPdfScanInput(file);
+      const pageTexts: string[] = [pdfInput.text];
 
-        setForm((prev) => ({
-          ...prev,
-          ndc: prev.ndc || barcodeNdc || prev.ndc,
-          rxNumber: prev.rxNumber || barcodeRx || prev.rxNumber,
-          amount: prev.amount || parsedBarcode.amount || prev.amount,
-          frequency: prev.frequency || parsedBarcode.frequency || prev.frequency,
-        }));
-
-        if (barcodeNdc) {
-          await applyNdcLookup(barcodeNdc);
-        }
-        if (barcodeRx) {
-          await handleRxHighlightResult(barcodeRx);
-        }
-        if (!barcodeNdc && !barcodeRx) {
-          setScanInfo('Read a barcode/QR code, but it did not expose a usable NDC or Rx number. Try manual NDC or Rx selection below.');
-        }
+      for (const image of pdfInput.pageImages) {
+        const [barcodeTexts, ocrResult] = await Promise.all([
+          readBarcodeTexts(image),
+          recognizeLabelText(image).catch(() => ({ text: '' })),
+        ]);
+        pageTexts.push(...barcodeTexts, ocrResult.text);
       }
 
-      const ocrResult = await recognizeLabelText(file);
-      const parsed = parseLabelText(ocrResult);
-      setForm((prev) => ({
-        ...prev,
-        ndc: prev.ndc || parsed.ndc || prev.ndc,
-        rxNumber: prev.rxNumber || parsed.rxNumber || prev.rxNumber,
-        amount: prev.amount || parsed.amount || prev.amount,
-        frequency: prev.frequency || parsed.frequency || prev.frequency,
-      }));
+      const combinedText = pageTexts.filter(Boolean).join('\n');
+      const meds = parseMedicationListText(combinedText);
+      const now = new Date().toISOString();
 
-      if (parsed.ndc) {
-        await applyNdcLookup(parsed.ndc);
+      if (meds.length > 1) {
+        for (const parsedMed of meds) {
+          const med: Medication = {
+            ...parsedMed,
+            id: uuid(),
+            createdAt: now,
+            updatedAt: now,
+          };
+          await medicationsStore.put(med);
+          if (med.rxNumber) {
+            await rxLookupStore.put({
+              rxNumber: med.rxNumber,
+              name: med.name,
+              brandOrCommonName: med.brandOrCommonName,
+              amount: med.amount,
+              frequency: med.frequency,
+              notes: med.notes,
+              updatedAt: now,
+            });
+          }
+        }
+        setScanInfo(`Imported ${meds.length} medications from the PDF.`);
+        navigate('/meds');
+        return;
       }
-      if (parsed.rxNumber) {
-        await handleRxHighlightResult(parsed.rxNumber);
+
+      if (meds.length === 1) {
+        setForm((prev) => ({ ...prev, ...meds[0] }));
+        if (meds[0].ndc) await applyNdcLookup(meds[0].ndc);
+        setScanInfo('Found one medication in the PDF. Review it before saving.');
+        return;
       }
+
+      await applyParsedText(combinedText, 'PDF');
     } catch {
-      setScanError('The automatic scan had trouble. Try manual NDC or Rx selection below.');
+      setScanError('Could not read that PDF. Text-based PDFs work best; scanned PDFs may need a clearer export or image upload.');
     } finally {
       setScanning(false);
     }
@@ -407,22 +491,45 @@ export default function MedFormPage() {
       </header>
 
       <div className="scan-section">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          onChange={handleScanFile}
-          hidden
-        />
-        <button
-          type="button"
-          className="secondary-button scan-button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={scanning}
-        >
-          {scanning ? 'Reading label + QR…' : '📷 Scan label, QR, or upload photo'}
-        </button>
+        <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleImageFile} hidden />
+        <input ref={imageInputRef} type="file" accept="image/*" onChange={handleImageFile} hidden />
+        <input ref={pdfInputRef} type="file" accept="application/pdf" onChange={handlePdfFile} hidden />
+
+        <div className="rx-picker">
+          <p className="rx-picker-hint">What do you want to scan?</p>
+          <div className="form-actions">
+            <button type="button" className="secondary-button" onClick={() => handleSource('camera')} disabled={scanning}>
+              Take picture
+            </button>
+            <button type="button" className="secondary-button" onClick={() => handleSource('imageUpload')} disabled={scanning}>
+              Upload picture
+            </button>
+            <button type="button" className="secondary-button" onClick={() => handleSource('pdfUpload')} disabled={scanning}>
+              Upload PDF/list
+            </button>
+          </div>
+        </div>
+
+        {scanSource && (
+          <div className="rx-picker">
+            <p className="rx-picker-hint">
+              What is in the {scanSource === 'camera' ? 'picture' : 'uploaded image'}?
+            </p>
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('barcode')} disabled={scanning}>
+                Barcode / QR
+              </button>
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('numbers')} disabled={scanning}>
+                NDC / Rx numbers
+              </button>
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('wholeLabel')} disabled={scanning}>
+                Whole label
+              </button>
+            </div>
+          </div>
+        )}
+
+        {scanning && <p className="login-info">Reading…</p>}
         {scanError && <p className="login-error">{scanError}</p>}
         {scanInfo && <p className="login-info">{scanInfo}</p>}
 
