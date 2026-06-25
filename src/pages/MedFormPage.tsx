@@ -64,7 +64,8 @@ function frequencyFromTimes(times: TimeOfDay[]): string {
 
 function extractLikelyNdcFromText(text: string): string | null {
   const normalized = normalizeNdcOcr(text);
-  const candidates = normalized.match(/[\d\s-]{10,16}/g) ?? [];
+  const labeled = normalized.match(/\bN[D0O][C0O][:\s#-]*([\d\s-]{10,16})\b/i);
+  const candidates = labeled ? [labeled[1]] : normalized.match(/[\d\s-]{10,16}/g) ?? [];
   return (
     candidates.find((candidate) => {
       const length = ndcDigits(candidate).length;
@@ -75,7 +76,7 @@ function extractLikelyNdcFromText(text: string): string | null {
 
 function extractLikelyRxFromText(text: string): string | null {
   const normalized = normalizeNdcOcr(text);
-  const labeled = normalized.match(/\bR\s?X\s?#?[:\s-]*([\d\s-]{4,16})/i);
+  const labeled = normalized.match(/\b(?:R\s?X|PRESCRIPTION)\s*(?:#|NO\.?|NUMBER|NUM)?\s*[:#-]?\s*([\d\s-]{4,16})\b/i);
   if (labeled) return ndcDigits(labeled[1]);
 
   const candidates = normalized.match(/[\d\s-]{6,16}/g) ?? [];
@@ -248,7 +249,7 @@ export default function MedFormPage() {
         const barcodeText = barcodeTexts.join('\n');
         const parsedBarcode = parseLabelText({ text: barcodeText });
         const barcodeNdc = parsedBarcode.ndc ?? extractLikelyNdcFromText(barcodeText);
-        const barcodeRx = extractLikelyRxFromText(barcodeText);
+        const barcodeRx = parsedBarcode.rxNumber ?? extractLikelyRxFromText(barcodeText);
 
         setForm((prev) => ({
           ...prev,
@@ -260,9 +261,11 @@ export default function MedFormPage() {
 
         if (barcodeNdc) {
           await applyNdcLookup(barcodeNdc);
-        } else if (barcodeRx) {
-          setScanInfo('Read a barcode/QR code and filled the Rx number. Add the medication name once if this is a new prescription.');
-        } else {
+        }
+        if (barcodeRx) {
+          await handleRxHighlightResult(barcodeRx);
+        }
+        if (!barcodeNdc && !barcodeRx) {
           setScanInfo('Read a barcode/QR code, but it did not expose a usable NDC or Rx number. Try manual NDC or Rx selection below.');
         }
       }
@@ -271,13 +274,17 @@ export default function MedFormPage() {
       const parsed = parseLabelText(ocrResult);
       setForm((prev) => ({
         ...prev,
+        ndc: prev.ndc || parsed.ndc || prev.ndc,
+        rxNumber: prev.rxNumber || parsed.rxNumber || prev.rxNumber,
         amount: prev.amount || parsed.amount || prev.amount,
         frequency: prev.frequency || parsed.frequency || prev.frequency,
       }));
 
       if (parsed.ndc) {
-        setForm((prev) => ({ ...prev, ndc: prev.ndc || parsed.ndc }));
         await applyNdcLookup(parsed.ndc);
+      }
+      if (parsed.rxNumber) {
+        await handleRxHighlightResult(parsed.rxNumber);
       }
     } catch {
       setScanError('The automatic scan had trouble. Try manual NDC or Rx selection below.');
