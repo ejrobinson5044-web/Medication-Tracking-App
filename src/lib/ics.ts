@@ -10,7 +10,7 @@ function formatLocalDateTime(date: Date, hour: number, minute: number): string {
 }
 
 function escapeText(text: string): string {
-  return text.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+  return text.replace(/\/g, '\\').replace(/;/g, '\;').replace(/,/g, '\,').replace(/\n/g, '\\n');
 }
 
 function formatUtcDateTime(date: Date): string {
@@ -41,7 +41,10 @@ export function generateIcs(meds: Medication[]): string {
 
   for (const med of meds) {
     for (const tod of med.timesOfDay) {
-      const { hour, minute } = TIME_OF_DAY_CLOCK[tod];
+      const clock = TIME_OF_DAY_CLOCK[tod];
+      if (!clock) continue;
+
+      const { hour, minute } = clock;
       const uid = `${med.id}-${tod}@medication-tracker`;
       const dtStart = formatLocalDateTime(startDate, hour, minute);
       const summary = escapeText(`Take ${med.name}${med.brandOrCommonName ? ` (${med.brandOrCommonName})` : ''}`);
