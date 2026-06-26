@@ -17,6 +17,15 @@ export const TIME_OF_DAY_CLOCK: Partial<Record<TimeOfDay, { hour: number; minute
   bedtime: { hour: 21, minute: 30 },
 };
 
+export interface ReminderSettings {
+  enabled: boolean;
+  time: string;
+  phone: boolean;
+  email: boolean;
+}
+
+export type ReminderSettingsByTime = Partial<Record<TimeOfDay, ReminderSettings>>;
+
 export interface Medication {
   id: string;
   name: string;
@@ -26,6 +35,7 @@ export interface Medication {
   amount: string;
   frequency: string;
   timesOfDay: TimeOfDay[];
+  reminderSettings?: ReminderSettingsByTime;
   notes?: string;
   createdAt: string;
   updatedAt: string;
