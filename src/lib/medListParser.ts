@@ -12,6 +12,7 @@ const COMMON_STOP_LINES = [
 
 function timesFromFrequency(text: string): TimeOfDay[] {
   const lower = text.toLowerCase();
+  if (/as needed|prn/.test(lower)) return ['asNeeded'];
   if (/bedtime|nightly|before bed|\bhs\b/.test(lower)) return ['bedtime'];
   if (/morning|breakfast|\bam\b|a\.m\./.test(lower)) return ['morning'];
   if (/noon|lunch|afternoon/.test(lower)) return ['noon'];
