@@ -1,8 +1,26 @@
-import type { Medication } from './types';
+import type { Medication, TimeOfDay } from './types';
 import { TIME_OF_DAY_CLOCK, TIME_OF_DAY_LABELS } from './types';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
+}
+
+function parseReminderTime(value: string): { hour: number; minute: number } | null {
+  const match = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
+function getReminderClock(med: Medication, tod: TimeOfDay): { hour: number; minute: number } | null {
+  const settings = med.reminderSettings?.[tod];
+  if (settings?.enabled) {
+    const parsed = parseReminderTime(settings.time);
+    if (parsed) return parsed;
+  }
+  return TIME_OF_DAY_CLOCK[tod] ?? null;
 }
 
 function formatLocalDateTime(date: Date, hour: number, minute: number): string {
@@ -10,7 +28,7 @@ function formatLocalDateTime(date: Date, hour: number, minute: number): string {
 }
 
 function escapeText(text: string): string {
-  return text.replace(/\/g, '\\').replace(/;/g, '\;').replace(/,/g, '\,').replace(/\n/g, '\\n');
+  return text.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
 }
 
 function formatUtcDateTime(date: Date): string {
@@ -41,18 +59,20 @@ export function generateIcs(meds: Medication[]): string {
 
   for (const med of meds) {
     for (const tod of med.timesOfDay) {
-      const clock = TIME_OF_DAY_CLOCK[tod];
+      const clock = getReminderClock(med, tod);
       if (!clock) continue;
 
-      const { hour, minute } = clock;
       const uid = `${med.id}-${tod}@medication-tracker`;
-      const dtStart = formatLocalDateTime(startDate, hour, minute);
+      const dtStart = formatLocalDateTime(startDate, clock.hour, clock.minute);
       const summary = escapeText(`Take ${med.name}${med.brandOrCommonName ? ` (${med.brandOrCommonName})` : ''}`);
+      const reminder = med.reminderSettings?.[tod];
       const descriptionParts = [
         `Amount: ${med.amount}`,
         `Frequency: ${med.frequency}`,
         `Time of day: ${TIME_OF_DAY_LABELS[tod]}`,
       ];
+      if (reminder?.email) descriptionParts.push('Email reminder requested');
+      if (reminder?.phone) descriptionParts.push('Phone reminder requested');
       if (med.notes) descriptionParts.push(`Notes: ${med.notes}`);
       const description = escapeText(descriptionParts.join('\n'));
 
