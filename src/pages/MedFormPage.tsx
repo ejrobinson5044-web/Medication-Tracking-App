@@ -13,15 +13,17 @@ import RxHighlightPicker from '../components/RxHighlightPicker';
 import {
   TIMES_OF_DAY,
   TIME_OF_DAY_LABELS,
+  TIME_OF_DAY_CLOCK,
   type Medication,
   type MedicationInput,
+  type ReminderSettings,
   type RxLookupEntry,
   type TimeOfDay,
 } from '../lib/types';
 
 type HighlightMode = 'rx' | 'ndc';
 type ScanSource = 'camera' | 'imageUpload' | null;
-type ImageScanTarget = 'wholeLabel' | 'barcode' | 'numbers';
+type ImageScanTarget = 'wholeLabel' | 'barcode' | 'numbers' | 'multiPhoto';
 
 function levenshtein(a: string, b: string): number {
   const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
@@ -47,7 +49,23 @@ function findRxCandidates(digits: string, entries: RxLookupEntry[]): RxLookupEnt
     .map(({ entry }) => entry);
 }
 
+function clockToInput(tod: TimeOfDay): string {
+  const clock = TIME_OF_DAY_CLOCK[tod];
+  if (!clock) return '';
+  return `${String(clock.hour).padStart(2, '0')}:${String(clock.minute).padStart(2, '0')}`;
+}
+
+function defaultReminder(tod: TimeOfDay): ReminderSettings {
+  return {
+    enabled: tod !== 'asNeeded',
+    time: clockToInput(tod),
+    phone: true,
+    email: false,
+  };
+}
+
 function frequencyFromTimes(times: TimeOfDay[]): string {
+  if (times.includes('asNeeded')) return 'As needed';
   switch (times.length) {
     case 0:
       return '';
@@ -68,25 +86,15 @@ function extractLikelyNdcFromText(text: string): string | null {
   const normalized = normalizeNdcOcr(text);
   const labeled = normalized.match(/\bN[D0O][C0O][:\s#-]*([\d\s-]{10,16})\b/i);
   const candidates = labeled ? [labeled[1]] : normalized.match(/[\d\s-]{10,16}/g) ?? [];
-  return (
-    candidates.find((candidate) => {
-      const length = ndcDigits(candidate).length;
-      return length === 10 || length === 11;
-    }) ?? null
-  );
+  return candidates.find((candidate) => [10, 11].includes(ndcDigits(candidate).length)) ?? null;
 }
 
 function extractLikelyRxFromText(text: string): string | null {
   const normalized = normalizeNdcOcr(text);
   const labeled = normalized.match(/\b(?:R\s?X|PRESCRIPTION)\s*(?:#|NO\.?|NUMBER|NUM)?\s*[:#-]?\s*([\d\s-]{4,16})\b/i);
   if (labeled) return ndcDigits(labeled[1]);
-
   const candidates = normalized.match(/[\d\s-]{6,16}/g) ?? [];
-  const digitGroups = candidates
-    .map((candidate) => ndcDigits(candidate))
-    .filter((candidate) => candidate.length >= 6)
-    .sort((a, b) => b.length - a.length);
-  return digitGroups[0] ?? null;
+  return candidates.map(ndcDigits).filter((candidate) => candidate.length >= 6).sort((a, b) => b.length - a.length)[0] ?? null;
 }
 
 const emptyForm: MedicationInput = {
@@ -97,6 +105,7 @@ const emptyForm: MedicationInput = {
   amount: '',
   frequency: '',
   timesOfDay: [],
+  reminderSettings: {},
   notes: '',
 };
 
@@ -118,6 +127,7 @@ export default function MedFormPage() {
   const [extractedRxNumber, setExtractedRxNumber] = useState<string | null>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const multiImageInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const [nameSuggestions, setNameSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -136,6 +146,7 @@ export default function MedFormPage() {
           amount: med.amount,
           frequency: med.frequency,
           timesOfDay: med.timesOfDay,
+          reminderSettings: med.reminderSettings ?? {},
           notes: med.notes ?? '',
         });
       }
@@ -192,12 +203,10 @@ export default function MedFormPage() {
         setScanInfo(`NDC read as ${ndc}, but no matching medication was found.`);
         return;
       }
-
       if (results.length === 1) {
         applyNdcMatch(results[0]);
         return;
       }
-
       setNdcCandidates(results);
       setScanInfo(`NDC read as ${ndc}. Pick the matching medication below.`);
     } finally {
@@ -215,18 +224,13 @@ export default function MedFormPage() {
     }));
     setHighlightMode(null);
     setNdcCandidates([]);
-    setScanInfo(
-      ndcResult.brandOrCommonName
-        ? `Identified from NDC: ${ndcResult.name} (${ndcResult.brandOrCommonName}).`
-        : `Identified from NDC: ${ndcResult.name}.`,
-    );
+    setScanInfo(ndcResult.brandOrCommonName ? `Identified from NDC: ${ndcResult.name} (${ndcResult.brandOrCommonName}).` : `Identified from NDC: ${ndcResult.name}.`);
   }
 
   async function applyParsedText(text: string, sourceLabel: string) {
     const parsed = parseLabelText({ text });
     const ndc = parsed.ndc ?? extractLikelyNdcFromText(text);
     const rxNumber = parsed.rxNumber ?? extractLikelyRxFromText(text);
-
     setForm((prev) => ({
       ...prev,
       ndc: prev.ndc || ndc || prev.ndc,
@@ -234,12 +238,9 @@ export default function MedFormPage() {
       amount: prev.amount || parsed.amount || prev.amount,
       frequency: prev.frequency || parsed.frequency || prev.frequency,
     }));
-
     if (ndc) await applyNdcLookup(ndc);
     if (rxNumber) await handleRxHighlightResult(rxNumber);
-    if (!ndc && !rxNumber && !parsed.amount && !parsed.frequency) {
-      setScanInfo(`${sourceLabel} was read, but no usable NDC, Rx number, dose, or frequency was found.`);
-    }
+    if (!ndc && !rxNumber && !parsed.amount && !parsed.frequency) setScanInfo(`${sourceLabel} was read, but no usable NDC, Rx number, dose, or frequency was found.`);
   }
 
   function handleNdcBlur() {
@@ -249,15 +250,33 @@ export default function MedFormPage() {
 
   function toggleTime(tod: TimeOfDay) {
     setForm((prev) => {
-      const timesOfDay = prev.timesOfDay.includes(tod)
-        ? prev.timesOfDay.filter((t) => t !== tod)
-        : [...prev.timesOfDay, tod];
+      if (tod === 'asNeeded') {
+        const timesOfDay: TimeOfDay[] = prev.timesOfDay.includes('asNeeded') ? [] : ['asNeeded'];
+        return { ...prev, timesOfDay, frequency: frequencyFromTimes(timesOfDay) };
+      }
+      const withoutAsNeeded = prev.timesOfDay.filter((t) => t !== 'asNeeded');
+      const timesOfDay = withoutAsNeeded.includes(tod) ? withoutAsNeeded.filter((t) => t !== tod) : [...withoutAsNeeded, tod];
       return {
         ...prev,
         timesOfDay,
         frequency: frequencyFromTimes(timesOfDay),
+        reminderSettings: {
+          ...prev.reminderSettings,
+          [tod]: prev.reminderSettings?.[tod] ?? defaultReminder(tod),
+          asNeeded: undefined,
+        },
       };
     });
+  }
+
+  function updateReminder(tod: TimeOfDay, patch: Partial<ReminderSettings>) {
+    setForm((prev) => ({
+      ...prev,
+      reminderSettings: {
+        ...prev.reminderSettings,
+        [tod]: { ...(prev.reminderSettings?.[tod] ?? defaultReminder(tod)), ...patch },
+      },
+    }));
   }
 
   function handleSource(source: NonNullable<ScanSource> | 'pdfUpload') {
@@ -272,6 +291,10 @@ export default function MedFormPage() {
   }
 
   function handleImageTarget(target: ImageScanTarget) {
+    if (target === 'multiPhoto') {
+      multiImageInputRef.current?.click();
+      return;
+    }
     const input = scanSource === 'camera' ? cameraInputRef.current : imageInputRef.current;
     input?.setAttribute('data-target', target);
     input?.click();
@@ -283,6 +306,28 @@ export default function MedFormPage() {
     e.target.value = '';
     if (!file) return;
     await processImageFile(file, target);
+  }
+
+  async function handleMultiImageFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    if (files.length === 0) return;
+    resetScanState();
+    setPendingImage(files[0]);
+    setScanning(true);
+    try {
+      const textParts: string[] = [];
+      for (const file of files.slice(0, 6)) {
+        const [barcodeTexts, ocrResult] = await Promise.all([readBarcodeTexts(file), recognizeLabelText(file).catch(() => ({ text: '' }))]);
+        textParts.push(...barcodeTexts, ocrResult.text);
+      }
+      await applyParsedText(textParts.filter(Boolean).join('\n'), `${files.length} photos`);
+      setScanInfo(`Read ${files.length} photo${files.length === 1 ? '' : 's'} and merged the results. Review before saving.`);
+    } catch {
+      setScanError('The multi-photo scan had trouble. Try fewer, sharper angles or use manual NDC/Rx selection.');
+    } finally {
+      setScanning(false);
+    }
   }
 
   async function processImageFile(file: File | Blob, target: ImageScanTarget) {
@@ -300,7 +345,6 @@ export default function MedFormPage() {
           return;
         }
       }
-
       if (target === 'numbers' || target === 'wholeLabel') {
         const ocrResult = await recognizeLabelText(file);
         await applyParsedText(ocrResult.text, target === 'numbers' ? 'NDC/Rx number image' : 'Label image');
@@ -316,59 +360,35 @@ export default function MedFormPage() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-
     resetScanState();
     setPendingImage(null);
     setScanning(true);
     try {
       const pdfInput = await extractPdfScanInput(file);
       const pageTexts: string[] = [pdfInput.text];
-
       for (const image of pdfInput.pageImages) {
-        const [barcodeTexts, ocrResult] = await Promise.all([
-          readBarcodeTexts(image),
-          recognizeLabelText(image).catch(() => ({ text: '' })),
-        ]);
+        const [barcodeTexts, ocrResult] = await Promise.all([readBarcodeTexts(image), recognizeLabelText(image).catch(() => ({ text: '' }))]);
         pageTexts.push(...barcodeTexts, ocrResult.text);
       }
-
       const combinedText = pageTexts.filter(Boolean).join('\n');
       const meds = parseMedicationListText(combinedText);
       const now = new Date().toISOString();
-
       if (meds.length > 1) {
         for (const parsedMed of meds) {
-          const med: Medication = {
-            ...parsedMed,
-            id: uuid(),
-            createdAt: now,
-            updatedAt: now,
-          };
+          const med: Medication = { ...parsedMed, id: uuid(), createdAt: now, updatedAt: now };
           await medicationsStore.put(med);
-          if (med.rxNumber) {
-            await rxLookupStore.put({
-              rxNumber: med.rxNumber,
-              name: med.name,
-              brandOrCommonName: med.brandOrCommonName,
-              amount: med.amount,
-              frequency: med.frequency,
-              notes: med.notes,
-              updatedAt: now,
-            });
-          }
+          if (med.rxNumber) await rxLookupStore.put({ rxNumber: med.rxNumber, name: med.name, brandOrCommonName: med.brandOrCommonName, amount: med.amount, frequency: med.frequency, notes: med.notes, updatedAt: now });
         }
         setScanInfo(`Imported ${meds.length} medications from the PDF.`);
         navigate('/meds');
         return;
       }
-
       if (meds.length === 1) {
         setForm((prev) => ({ ...prev, ...meds[0] }));
         if (meds[0].ndc) await applyNdcLookup(meds[0].ndc);
         setScanInfo('Found one medication in the PDF. Review it before saving.');
         return;
       }
-
       await applyParsedText(combinedText, 'PDF');
     } catch {
       setScanError('Could not read that PDF. Text-based PDFs work best; scanned PDFs may need a clearer export or image upload.');
@@ -391,30 +411,17 @@ export default function MedFormPage() {
       applyRxMatch(known);
       return;
     }
-    const allEntries = await rxLookupStore.getAll();
-    const candidates = findRxCandidates(digits, allEntries);
+    const candidates = findRxCandidates(digits, await rxLookupStore.getAll());
     if (candidates.length === 0) {
       setForm((prev) => ({ ...prev, rxNumber: digits }));
-      setScanInfo(
-        form.name
-          ? `Rx# saved — we'll remember it's ${form.name} for refills.`
-          : "New prescription — enter the medication name once below and we'll remember it for refills.",
-      );
+      setScanInfo(form.name ? `Rx# saved — we'll remember it's ${form.name} for refills.` : "New prescription — enter the medication name once below and we'll remember it for refills.");
       return;
     }
     setRxCandidates(candidates);
   }
 
   function applyRxMatch(entry: RxLookupEntry) {
-    setForm((prev) => ({
-      ...prev,
-      rxNumber: entry.rxNumber,
-      name: entry.name,
-      brandOrCommonName: entry.brandOrCommonName || '',
-      amount: prev.amount || entry.amount,
-      frequency: prev.frequency || entry.frequency,
-      notes: prev.notes || entry.notes || '',
-    }));
+    setForm((prev) => ({ ...prev, rxNumber: entry.rxNumber, name: entry.name, brandOrCommonName: entry.brandOrCommonName || '', amount: prev.amount || entry.amount, frequency: prev.frequency || entry.frequency, notes: prev.notes || entry.notes || '' }));
     setScanInfo(`Matched to a saved prescription — filled in ${entry.name}.`);
     setPendingImage(null);
     setHighlightMode(null);
@@ -426,11 +433,7 @@ export default function MedFormPage() {
   function handleNoCandidateMatch() {
     if (extractedRxNumber) {
       setForm((prev) => ({ ...prev, rxNumber: extractedRxNumber }));
-      setScanInfo(
-        form.name
-          ? `Rx# saved — we'll remember it's ${form.name} for refills.`
-          : "New prescription — enter the medication name once below and we'll remember it for refills.",
-      );
+      setScanInfo(form.name ? `Rx# saved — we'll remember it's ${form.name} for refills.` : "New prescription — enter the medication name once below and we'll remember it for refills.");
     }
     setPendingImage(null);
     setHighlightMode(null);
@@ -450,35 +453,9 @@ export default function MedFormPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const now = new Date().toISOString();
-    if (isEdit && id) {
-      const existing = await medicationsStore.get(id);
-      const med: Medication = {
-        ...form,
-        id,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      };
-      await medicationsStore.put(med);
-    } else {
-      const med: Medication = {
-        ...form,
-        id: uuid(),
-        createdAt: now,
-        updatedAt: now,
-      };
-      await medicationsStore.put(med);
-    }
-    if (form.rxNumber) {
-      await rxLookupStore.put({
-        rxNumber: form.rxNumber,
-        name: form.name,
-        brandOrCommonName: form.brandOrCommonName,
-        amount: form.amount,
-        frequency: form.frequency,
-        notes: form.notes,
-        updatedAt: now,
-      });
-    }
+    const med: Medication = { ...form, id: isEdit && id ? id : uuid(), createdAt: isEdit && id ? (await medicationsStore.get(id))?.createdAt ?? now : now, updatedAt: now };
+    await medicationsStore.put(med);
+    if (form.rxNumber) await rxLookupStore.put({ rxNumber: form.rxNumber, name: form.name, brandOrCommonName: form.brandOrCommonName, amount: form.amount, frequency: form.frequency, notes: form.notes, updatedAt: now });
     navigate('/meds');
   }
 
@@ -486,45 +463,31 @@ export default function MedFormPage() {
 
   return (
     <div className="page form-page">
-      <header className="page-header">
-        <h1>{isEdit ? 'Edit Medication' : 'Add Medication'}</h1>
-      </header>
+      <header className="page-header"><h1>{isEdit ? 'Edit Medication' : 'Add Medication'}</h1></header>
 
       <div className="scan-section">
         <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleImageFile} hidden />
         <input ref={imageInputRef} type="file" accept="image/*" onChange={handleImageFile} hidden />
+        <input ref={multiImageInputRef} type="file" accept="image/*" multiple onChange={handleMultiImageFiles} hidden />
         <input ref={pdfInputRef} type="file" accept="application/pdf" onChange={handlePdfFile} hidden />
 
         <div className="rx-picker">
           <p className="rx-picker-hint">What do you want to scan?</p>
           <div className="form-actions">
-            <button type="button" className="secondary-button" onClick={() => handleSource('camera')} disabled={scanning}>
-              Take picture
-            </button>
-            <button type="button" className="secondary-button" onClick={() => handleSource('imageUpload')} disabled={scanning}>
-              Upload picture
-            </button>
-            <button type="button" className="secondary-button" onClick={() => handleSource('pdfUpload')} disabled={scanning}>
-              Upload PDF/list
-            </button>
+            <button type="button" className="secondary-button" onClick={() => handleSource('camera')} disabled={scanning}>Take picture</button>
+            <button type="button" className="secondary-button" onClick={() => handleSource('imageUpload')} disabled={scanning}>Upload picture</button>
+            <button type="button" className="secondary-button" onClick={() => handleSource('pdfUpload')} disabled={scanning}>Upload PDF/list</button>
           </div>
         </div>
 
         {scanSource && (
           <div className="rx-picker">
-            <p className="rx-picker-hint">
-              What is in the {scanSource === 'camera' ? 'picture' : 'uploaded image'}?
-            </p>
+            <p className="rx-picker-hint">What is in the {scanSource === 'camera' ? 'picture' : 'uploaded image'}?</p>
             <div className="form-actions">
-              <button type="button" className="secondary-button" onClick={() => handleImageTarget('barcode')} disabled={scanning}>
-                Barcode / QR
-              </button>
-              <button type="button" className="secondary-button" onClick={() => handleImageTarget('numbers')} disabled={scanning}>
-                NDC / Rx numbers
-              </button>
-              <button type="button" className="secondary-button" onClick={() => handleImageTarget('wholeLabel')} disabled={scanning}>
-                Whole label
-              </button>
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('barcode')} disabled={scanning}>Barcode / QR</button>
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('numbers')} disabled={scanning}>NDC / Rx numbers</button>
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('wholeLabel')} disabled={scanning}>Whole label</button>
+              <button type="button" className="secondary-button" onClick={() => handleImageTarget('multiPhoto')} disabled={scanning}>Multi-photo bottle scan</button>
             </div>
           </div>
         )}
@@ -534,184 +497,57 @@ export default function MedFormPage() {
         {scanInfo && <p className="login-info">{scanInfo}</p>}
 
         {ndcCandidates.length > 0 && (
-          <div className="rx-picker">
-            <p className="rx-picker-hint">Multiple medications matched that NDC pattern:</p>
-            <ul className="rx-candidate-list">
-              {ndcCandidates.map((candidate) => (
-                <li key={`${candidate.ndc}-${candidate.name}-${candidate.amount ?? ''}`}>
-                  <button type="button" onClick={() => applyNdcMatch(candidate)}>
-                    {candidate.name}
-                    <span className="rx-candidate-meta">
-                      NDC {candidate.ndc}
-                      {candidate.brandOrCommonName ? ` • ${candidate.brandOrCommonName}` : ''}
-                      {candidate.amount ? ` • ${candidate.amount}` : ''}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <div className="rx-picker"><p className="rx-picker-hint">Multiple medications matched that NDC pattern:</p><ul className="rx-candidate-list">{ndcCandidates.map((candidate) => (<li key={`${candidate.ndc}-${candidate.name}-${candidate.amount ?? ''}`}><button type="button" onClick={() => applyNdcMatch(candidate)}>{candidate.name}<span className="rx-candidate-meta">NDC {candidate.ndc}{candidate.brandOrCommonName ? ` • ${candidate.brandOrCommonName}` : ''}{candidate.amount ? ` • ${candidate.amount}` : ''}</span></button></li>))}</ul></div>
         )}
 
         {pendingImage && !highlightMode && rxCandidates.length === 0 && ndcCandidates.length === 0 && (
-          <div className="rx-picker">
-            <p className="rx-picker-hint">Need a tighter read? Select which number you want to drag around.</p>
-            <div className="form-actions">
-              <button type="button" className="secondary-button" onClick={() => setHighlightMode('ndc')}>
-                Drag NDC
-              </button>
-              <button type="button" className="secondary-button" onClick={() => setHighlightMode('rx')}>
-                Drag Rx #
-              </button>
-              <button type="button" className="secondary-button" onClick={cancelScan}>
-                Done
-              </button>
-            </div>
-          </div>
+          <div className="rx-picker"><p className="rx-picker-hint">Need a tighter read? Select which number you want to drag around.</p><div className="form-actions"><button type="button" className="secondary-button" onClick={() => setHighlightMode('ndc')}>Drag NDC</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('rx')}>Drag Rx #</button><button type="button" className="secondary-button" onClick={cancelScan}>Done</button></div></div>
         )}
 
-        {pendingImage && highlightMode && (
-          <RxHighlightPicker
-            image={pendingImage}
-            mode={highlightMode}
-            onResult={(value) => void (highlightMode === 'ndc' ? handleNdcHighlightResult(value) : handleRxHighlightResult(value))}
-            onCancel={() => setHighlightMode(null)}
-          />
-        )}
+        {pendingImage && highlightMode && <RxHighlightPicker image={pendingImage} mode={highlightMode} onResult={(value) => void (highlightMode === 'ndc' ? handleNdcHighlightResult(value) : handleRxHighlightResult(value))} onCancel={() => setHighlightMode(null)} />}
 
         {rxCandidates.length > 0 && (
-          <div className="rx-picker">
-            <p className="rx-picker-hint">
-              Read “{extractedRxNumber}” — which prescription is this?
-            </p>
-            <ul className="rx-candidate-list">
-              {rxCandidates.map((c) => (
-                <li key={c.rxNumber}>
-                  <button type="button" onClick={() => applyRxMatch(c)}>
-                    {c.name}
-                    <span className="rx-candidate-meta">Rx# {c.rxNumber}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <div className="form-actions">
-              <button type="button" className="secondary-button" onClick={handleNoCandidateMatch}>
-                None of these — new prescription
-              </button>
-            </div>
-          </div>
+          <div className="rx-picker"><p className="rx-picker-hint">Read “{extractedRxNumber}” — which prescription is this?</p><ul className="rx-candidate-list">{rxCandidates.map((c) => (<li key={c.rxNumber}><button type="button" onClick={() => applyRxMatch(c)}>{c.name}<span className="rx-candidate-meta">Rx# {c.rxNumber}</span></button></li>))}</ul><div className="form-actions"><button type="button" className="secondary-button" onClick={handleNoCandidateMatch}>None of these — new prescription</button></div></div>
         )}
       </div>
 
       <form className="med-form" onSubmit={handleSubmit}>
-        <label>
-          NDC (National Drug Code)
-          <input
-            value={form.ndc}
-            onChange={(e) => setForm({ ...form, ndc: e.target.value })}
-            onBlur={handleNdcBlur}
-            placeholder="e.g. 00074-3368-13 or 00074336813"
-          />
-          {ndcLooking && <span className="login-info">Looking up…</span>}
-        </label>
+        <label>NDC (National Drug Code)<input value={form.ndc} onChange={(e) => setForm({ ...form, ndc: e.target.value })} onBlur={handleNdcBlur} placeholder="e.g. 00074-3368-13 or 00074336813" />{ndcLooking && <span className="login-info">Looking up…</span>}</label>
 
-        <label className="name-field">
-          Name
-          <input
-            required
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            onFocus={() => setShowSuggestions(nameSuggestions.length > 0)}
-            onBlur={() => setTimeout(() => setShowSuggestions(false), 100)}
-            placeholder="e.g. Lisinopril"
-            autoComplete="off"
-          />
-          {showSuggestions && (
-            <ul className="suggestion-list">
-              {nameSuggestions.map((suggestion) => (
-                <li key={suggestion}>
-                  <button type="button" onMouseDown={() => selectNameSuggestion(suggestion)}>
-                    {suggestion}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </label>
+        <label className="name-field">Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} onFocus={() => setShowSuggestions(nameSuggestions.length > 0)} onBlur={() => setTimeout(() => setShowSuggestions(false), 100)} placeholder="e.g. Lisinopril" autoComplete="off" />{showSuggestions && <ul className="suggestion-list">{nameSuggestions.map((suggestion) => (<li key={suggestion}><button type="button" onMouseDown={() => selectNameSuggestion(suggestion)}>{suggestion}</button></li>))}</ul>}</label>
 
-        <label>
-          Brand / common name
-          <input
-            value={form.brandOrCommonName}
-            onChange={(e) => setForm({ ...form, brandOrCommonName: e.target.value })}
-            placeholder="e.g. Prinivil (optional)"
-          />
-        </label>
-
-        <label>
-          Rx # (prescription number)
-          <input
-            value={form.rxNumber}
-            onChange={(e) => setForm({ ...form, rxNumber: ndcDigits(e.target.value) })}
-            placeholder="e.g. 1234567"
-          />
-        </label>
-
-        <label>
-          Amount / dose
-          <input
-            required
-            value={form.amount}
-            onChange={(e) => setForm({ ...form, amount: e.target.value })}
-            placeholder="e.g. 10mg, 1 tablet"
-          />
-        </label>
+        <label>Brand / common name<input value={form.brandOrCommonName} onChange={(e) => setForm({ ...form, brandOrCommonName: e.target.value })} placeholder="e.g. Prinivil (optional)" /></label>
+        <label>Rx # (prescription number)<input value={form.rxNumber} onChange={(e) => setForm({ ...form, rxNumber: ndcDigits(e.target.value) })} placeholder="e.g. 1234567" /></label>
+        <label>Amount / dose<input required value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="e.g. 10mg, 1 tablet" /></label>
 
         <fieldset className="time-of-day-picker">
-          <div className="time-of-day-header">
-            <legend>Time(s) of day</legend>
-            <span className="rx-candidate-meta">Frequency fills from this</span>
-          </div>
-          {TIMES_OF_DAY.map((tod) => (
-            <label key={tod} className="checkbox-pill">
-              <input
-                type="checkbox"
-                checked={form.timesOfDay.includes(tod)}
-                onChange={() => toggleTime(tod)}
-              />
-              {TIME_OF_DAY_LABELS[tod]}
-            </label>
-          ))}
+          <div className="time-of-day-header"><legend>Time(s) of day</legend><span className="rx-candidate-meta">Frequency fills from this</span></div>
+          {TIMES_OF_DAY.map((tod) => (<label key={tod} className="checkbox-pill"><input type="checkbox" checked={form.timesOfDay.includes(tod)} onChange={() => toggleTime(tod)} />{TIME_OF_DAY_LABELS[tod]}</label>))}
         </fieldset>
 
-        <label>
-          Frequency
-          <input
-            required
-            value={form.frequency}
-            onChange={(e) => setForm({ ...form, frequency: e.target.value })}
-            placeholder="e.g. Twice daily"
-          />
-        </label>
+        <label>Frequency<input required value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} placeholder="e.g. Twice daily or As needed" /></label>
 
-        <label>
-          Notes
-          <textarea
-            value={form.notes}
-            onChange={(e) => setForm({ ...form, notes: e.target.value })}
-            placeholder="Optional notes"
-            rows={3}
-          />
-        </label>
+        {form.timesOfDay.length > 0 && !form.timesOfDay.includes('asNeeded') && (
+          <fieldset className="time-of-day-picker">
+            <div className="time-of-day-header"><legend>Reminder settings</legend><span className="rx-candidate-meta">Used by calendar export now; email/SMS needs backend delivery later</span></div>
+            {form.timesOfDay.map((tod) => {
+              const settings = form.reminderSettings?.[tod] ?? defaultReminder(tod);
+              return (
+                <div key={tod} className="rx-picker">
+                  <p className="rx-picker-hint">{TIME_OF_DAY_LABELS[tod]} reminder</p>
+                  <label className="checkbox-pill"><input type="checkbox" checked={settings.enabled} onChange={(e) => updateReminder(tod, { enabled: e.target.checked })} />Enable reminder</label>
+                  <label>Reminder time<input type="time" value={settings.time} onChange={(e) => updateReminder(tod, { time: e.target.value })} /></label>
+                  <label className="checkbox-pill"><input type="checkbox" checked={settings.phone} onChange={(e) => updateReminder(tod, { phone: e.target.checked })} />Phone/calendar alert</label>
+                  <label className="checkbox-pill"><input type="checkbox" checked={settings.email} onChange={(e) => updateReminder(tod, { email: e.target.checked })} />Email reminder</label>
+                </div>
+              );
+            })}
+          </fieldset>
+        )}
 
-        <div className="form-actions">
-          <button type="button" className="secondary-button" onClick={() => navigate(-1)}>
-            Cancel
-          </button>
-          <button type="submit" className="primary-button" disabled={form.timesOfDay.length === 0}>
-            Save
-          </button>
-        </div>
+        <label>Notes<textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional notes" rows={3} /></label>
+
+        <div className="form-actions"><button type="button" className="secondary-button" onClick={() => navigate(-1)}>Cancel</button><button type="submit" className="primary-button" disabled={form.timesOfDay.length === 0}>Save</button></div>
       </form>
     </div>
   );
