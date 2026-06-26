@@ -1,15 +1,16 @@
-export type TimeOfDay = 'morning' | 'noon' | 'evening' | 'bedtime';
+export type TimeOfDay = 'morning' | 'noon' | 'evening' | 'bedtime' | 'asNeeded';
 
-export const TIMES_OF_DAY: TimeOfDay[] = ['morning', 'noon', 'evening', 'bedtime'];
+export const TIMES_OF_DAY: TimeOfDay[] = ['morning', 'noon', 'evening', 'bedtime', 'asNeeded'];
 
 export const TIME_OF_DAY_LABELS: Record<TimeOfDay, string> = {
   morning: 'Morning',
   noon: 'Afternoon',
   evening: 'Evening',
   bedtime: 'Bedtime',
+  asNeeded: 'As needed',
 };
 
-export const TIME_OF_DAY_CLOCK: Record<TimeOfDay, { hour: number; minute: number }> = {
+export const TIME_OF_DAY_CLOCK: Partial<Record<TimeOfDay, { hour: number; minute: number }>> = {
   morning: { hour: 8, minute: 0 },
   noon: { hour: 12, minute: 0 },
   evening: { hour: 18, minute: 0 },
