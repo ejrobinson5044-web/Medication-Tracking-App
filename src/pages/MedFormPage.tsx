@@ -10,7 +10,7 @@ import { ndcDigits } from '../lib/ndc';
 import { extractPdfScanInput } from '../lib/pdf';
 import { parseMedicationListText } from '../lib/medListParser';
 import { inferMedicationFromScanText, evidenceSummary } from '../lib/scanInference';
-import RxHighlightPicker from '../components/RxHighlightPicker';
+import RxHighlightPicker, { type HighlightMode } from '../components/RxHighlightPicker';
 import {
   TIMES_OF_DAY,
   TIME_OF_DAY_LABELS,
@@ -22,7 +22,6 @@ import {
   type TimeOfDay,
 } from '../lib/types';
 
-type HighlightMode = 'rx' | 'ndc';
 type ScanSource = 'camera' | 'imageUpload' | null;
 type ImageScanTarget = 'wholeLabel' | 'barcode' | 'numbers' | 'multiPhoto';
 
@@ -54,12 +53,7 @@ function clockToInput(tod: TimeOfDay): string {
 }
 
 function defaultReminder(tod: TimeOfDay): ReminderSettings {
-  return {
-    enabled: tod !== 'asNeeded',
-    time: clockToInput(tod),
-    phone: true,
-    email: false,
-  };
+  return { enabled: tod !== 'asNeeded', time: clockToInput(tod), phone: true, email: false };
 }
 
 function frequencyFromTimes(times: TimeOfDay[]): string {
@@ -168,12 +162,7 @@ export default function MedFormPage() {
   function selectNameSuggestion(raw: string) {
     suppressNextLookup.current = true;
     const parsed = parseDrugDisplayName(raw);
-    setForm((prev) => ({
-      ...prev,
-      name: parsed.name,
-      brandOrCommonName: prev.brandOrCommonName || parsed.brandOrCommonName || prev.brandOrCommonName,
-      amount: prev.amount || parsed.amount || prev.amount,
-    }));
+    setForm((prev) => ({ ...prev, name: parsed.name, brandOrCommonName: prev.brandOrCommonName || parsed.brandOrCommonName || prev.brandOrCommonName, amount: prev.amount || parsed.amount || prev.amount }));
     setShowSuggestions(false);
   }
 
@@ -198,14 +187,7 @@ export default function MedFormPage() {
   }
 
   function applyNdcMatch(ndcResult: NdcLookupResult) {
-    setForm((prev) => ({
-      ...prev,
-      ndc: ndcResult.ndc,
-      name: ndcResult.name || prev.name,
-      brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName,
-      amount: prev.amount || ndcResult.amount || prev.amount,
-    }));
-    setHighlightMode(null);
+    setForm((prev) => ({ ...prev, ndc: ndcResult.ndc, name: ndcResult.name || prev.name, brandOrCommonName: prev.brandOrCommonName || ndcResult.brandOrCommonName || prev.brandOrCommonName, amount: prev.amount || ndcResult.amount || prev.amount }));
     setNdcCandidates([]);
     setScanInfo((prev) => `${prev ? `${prev} ` : ''}${ndcResult.brandOrCommonName ? `Verified from NDC: ${ndcResult.name} (${ndcResult.brandOrCommonName}).` : `Verified from NDC: ${ndcResult.name}.`}`);
   }
@@ -232,9 +214,44 @@ export default function MedFormPage() {
     const summary = `${sourceLabel}: ${evidenceSummary(inference)}`;
     const warnings = inference.warnings.length ? ` ${inference.warnings.join(' ')}` : '';
     setScanInfo(`${summary}${warnings}`);
-
     if (ndc && (inference.fields.ndc?.confidence ?? 0) >= 65) await applyNdcLookup(ndc);
     if (rxNumber && (inference.fields.rxNumber?.confidence ?? 0) >= 70) await handleRxHighlightResult(rxNumber);
+  }
+
+  async function handleFieldHighlightResult(mode: HighlightMode, value: string, rawText: string) {
+    setHighlightMode(null);
+    switch (mode) {
+      case 'ndc':
+        setForm((prev) => ({ ...prev, ndc: value }));
+        setScanInfo(`Placed highlighted text into NDC: ${value}.`);
+        await applyNdcLookup(value);
+        break;
+      case 'rx':
+        setForm((prev) => ({ ...prev, rxNumber: value }));
+        setScanInfo(`Placed highlighted text into Rx #: ${value}.`);
+        await handleRxHighlightResult(value);
+        break;
+      case 'name':
+        setForm((prev) => ({ ...prev, name: value }));
+        setScanInfo(`Placed highlighted text into medication name: ${value}.`);
+        break;
+      case 'amount':
+        setForm((prev) => ({ ...prev, amount: value }));
+        setScanInfo(`Placed highlighted text into dose/amount: ${value}.`);
+        break;
+      case 'frequency': {
+        const inference = inferMedicationFromScanText([rawText || value]);
+        const frequency = (inference.fields.frequency?.value as string | undefined) ?? value;
+        const timesOfDay = inference.fields.timesOfDay?.value as TimeOfDay[] | undefined;
+        setForm((prev) => ({ ...prev, frequency, timesOfDay: timesOfDay?.length ? timesOfDay : prev.timesOfDay }));
+        setScanInfo(`Placed highlighted directions into frequency: ${frequency}.`);
+        break;
+      }
+      case 'notes':
+        setForm((prev) => ({ ...prev, notes: prev.notes ? `${prev.notes}\n${value}` : value }));
+        setScanInfo('Added highlighted text to notes.');
+        break;
+    }
   }
 
   function handleNdcBlur() {
@@ -250,27 +267,12 @@ export default function MedFormPage() {
       }
       const withoutAsNeeded = prev.timesOfDay.filter((t) => t !== 'asNeeded');
       const timesOfDay = withoutAsNeeded.includes(tod) ? withoutAsNeeded.filter((t) => t !== tod) : [...withoutAsNeeded, tod];
-      return {
-        ...prev,
-        timesOfDay,
-        frequency: frequencyFromTimes(timesOfDay),
-        reminderSettings: {
-          ...prev.reminderSettings,
-          [tod]: prev.reminderSettings?.[tod] ?? defaultReminder(tod),
-          asNeeded: undefined,
-        },
-      };
+      return { ...prev, timesOfDay, frequency: frequencyFromTimes(timesOfDay), reminderSettings: { ...prev.reminderSettings, [tod]: prev.reminderSettings?.[tod] ?? defaultReminder(tod), asNeeded: undefined } };
     });
   }
 
   function updateReminder(tod: TimeOfDay, patch: Partial<ReminderSettings>) {
-    setForm((prev) => ({
-      ...prev,
-      reminderSettings: {
-        ...prev.reminderSettings,
-        [tod]: { ...(prev.reminderSettings?.[tod] ?? defaultReminder(tod)), ...patch },
-      },
-    }));
+    setForm((prev) => ({ ...prev, reminderSettings: { ...prev.reminderSettings, [tod]: { ...(prev.reminderSettings?.[tod] ?? defaultReminder(tod)), ...patch } } }));
   }
 
   function handleSource(source: NonNullable<ScanSource> | 'pdfUpload') {
@@ -317,7 +319,7 @@ export default function MedFormPage() {
       }
       await applyParsedText(textParts.filter(Boolean).join('\n'), `${files.length} photos`);
     } catch {
-      setScanError('The multi-photo scan had trouble. Try fewer, sharper angles or use manual NDC/Rx selection.');
+      setScanError('The multi-photo scan had trouble. Try fewer, sharper angles or use manual field highlighting.');
     } finally {
       setScanning(false);
     }
@@ -333,7 +335,7 @@ export default function MedFormPage() {
         const barcodeTexts = await readBarcodeTexts(file);
         textParts.push(...barcodeTexts);
         if (target === 'barcode' && barcodeTexts.length === 0) {
-          setScanInfo('No readable barcode or QR code was found. Try a closer, sharper photo or use NDC/Rx number mode.');
+          setScanInfo('No readable barcode or QR code was found. Use the field highlighter below to manually place text into each field.');
           return;
         }
       }
@@ -343,7 +345,7 @@ export default function MedFormPage() {
       }
       await applyParsedText(textParts.filter(Boolean).join('\n'), target === 'numbers' ? 'NDC/Rx number image' : target === 'barcode' ? 'Barcode/QR code' : 'Label image');
     } catch {
-      setScanError('The scan had trouble. Try another scan mode or use manual NDC/Rx selection below.');
+      setScanError('The scan had trouble. Use the field highlighter below to manually place text into each field.');
     } finally {
       setScanning(false);
     }
@@ -390,14 +392,7 @@ export default function MedFormPage() {
     }
   }
 
-  async function handleNdcHighlightResult(value: string) {
-    setHighlightMode(null);
-    setForm((prev) => ({ ...prev, ndc: value }));
-    await applyNdcLookup(value);
-  }
-
   async function handleRxHighlightResult(digits: string) {
-    setHighlightMode(null);
     setExtractedRxNumber(digits);
     const known = await rxLookupStore.get(digits);
     if (known) {
@@ -405,17 +400,12 @@ export default function MedFormPage() {
       return;
     }
     const candidates = findRxCandidates(digits, await rxLookupStore.getAll());
-    if (candidates.length === 0) {
-      setForm((prev) => ({ ...prev, rxNumber: digits }));
-      return;
-    }
-    setRxCandidates(candidates);
+    if (candidates.length > 0) setRxCandidates(candidates);
   }
 
   function applyRxMatch(entry: RxLookupEntry) {
     setForm((prev) => ({ ...prev, rxNumber: entry.rxNumber, name: entry.name, brandOrCommonName: entry.brandOrCommonName || '', amount: prev.amount || entry.amount, frequency: prev.frequency || entry.frequency, notes: prev.notes || entry.notes || '' }));
     setScanInfo((prev) => `${prev ? `${prev} ` : ''}Matched to a saved prescription — filled in ${entry.name}.`);
-    setPendingImage(null);
     setHighlightMode(null);
     setRxCandidates([]);
     setNdcCandidates([]);
@@ -424,7 +414,6 @@ export default function MedFormPage() {
 
   function handleNoCandidateMatch() {
     if (extractedRxNumber) setForm((prev) => ({ ...prev, rxNumber: extractedRxNumber }));
-    setPendingImage(null);
     setHighlightMode(null);
     setRxCandidates([]);
     setNdcCandidates([]);
@@ -464,8 +453,8 @@ export default function MedFormPage() {
         {scanError && <p className="login-error">{scanError}</p>}
         {scanInfo && <p className="login-info">{scanInfo}</p>}
         {ndcCandidates.length > 0 && <div className="rx-picker"><p className="rx-picker-hint">Multiple medications matched that NDC pattern:</p><ul className="rx-candidate-list">{ndcCandidates.map((candidate) => <li key={`${candidate.ndc}-${candidate.name}-${candidate.amount ?? ''}`}><button type="button" onClick={() => applyNdcMatch(candidate)}>{candidate.name}<span className="rx-candidate-meta">NDC {candidate.ndc}{candidate.brandOrCommonName ? ` • ${candidate.brandOrCommonName}` : ''}{candidate.amount ? ` • ${candidate.amount}` : ''}</span></button></li>)}</ul></div>}
-        {pendingImage && !highlightMode && rxCandidates.length === 0 && ndcCandidates.length === 0 && <div className="rx-picker"><p className="rx-picker-hint">Need a tighter read? Select which number you want to drag around.</p><div className="form-actions"><button type="button" className="secondary-button" onClick={() => setHighlightMode('ndc')}>Drag NDC</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('rx')}>Drag Rx #</button><button type="button" className="secondary-button" onClick={cancelScan}>Done</button></div></div>}
-        {pendingImage && highlightMode && <RxHighlightPicker image={pendingImage} mode={highlightMode} onResult={(value) => void (highlightMode === 'ndc' ? handleNdcHighlightResult(value) : handleRxHighlightResult(value))} onCancel={() => setHighlightMode(null)} />}
+        {pendingImage && !highlightMode && <div className="rx-picker"><p className="rx-picker-hint">Use this same photo to manually place fields. Pick a field, highlight it, then repeat for the next field.</p><div className="form-actions"><button type="button" className="secondary-button" onClick={() => setHighlightMode('ndc')}>NDC Number</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('rx')}>Rx Number</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('name')}>Medication Name</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('amount')}>Dose / Amount</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('frequency')}>Directions / Frequency</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('notes')}>Notes</button><button type="button" className="secondary-button" onClick={cancelScan}>Close photo</button></div></div>}
+        {pendingImage && highlightMode && <RxHighlightPicker image={pendingImage} mode={highlightMode} onResult={(value, rawText) => void handleFieldHighlightResult(highlightMode, value, rawText)} onCancel={() => setHighlightMode(null)} />}
         {rxCandidates.length > 0 && <div className="rx-picker"><p className="rx-picker-hint">Read “{extractedRxNumber}” — which prescription is this?</p><ul className="rx-candidate-list">{rxCandidates.map((c) => <li key={c.rxNumber}><button type="button" onClick={() => applyRxMatch(c)}>{c.name}<span className="rx-candidate-meta">Rx# {c.rxNumber}</span></button></li>)}</ul><div className="form-actions"><button type="button" className="secondary-button" onClick={handleNoCandidateMatch}>None of these — new prescription</button></div></div>}
       </div>
       <form className="med-form" onSubmit={handleSubmit}>
