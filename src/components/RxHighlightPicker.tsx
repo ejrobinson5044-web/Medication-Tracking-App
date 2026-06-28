@@ -9,19 +9,35 @@ interface Box {
   h: number;
 }
 
-type HighlightMode = 'rx' | 'ndc';
+export type HighlightMode = 'rx' | 'ndc' | 'name' | 'amount' | 'frequency' | 'notes';
 
 interface RxHighlightPickerProps {
   image: Blob;
   mode?: HighlightMode;
-  onResult: (value: string) => void;
+  onResult: (value: string, rawText: string) => void;
   onCancel: () => void;
 }
 
 const POINTER_Y_OFFSET = 54;
 
+const LABELS: Record<HighlightMode, string> = {
+  rx: 'Rx number',
+  ndc: 'NDC number',
+  name: 'Medication name',
+  amount: 'Dose / amount',
+  frequency: 'Directions / frequency',
+  notes: 'Notes',
+};
+
 function normalizeOcrNumberText(text: string): string {
   return normalizeNdcOcr(text).replace(/[—–]/g, '-');
+}
+
+function cleanupText(text: string): string {
+  return text
+    .replace(/[|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function extractNdc(text: string): string | null {
@@ -49,15 +65,41 @@ function extractRx(text: string): string | null {
   return plausible[0] ?? null;
 }
 
-function extractNumber(text: string, mode: HighlightMode): string | null {
-  return mode === 'ndc' ? extractNdc(text) : extractRx(text);
+function extractAmount(text: string): string | null {
+  const match = cleanupText(text).match(/\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?|tablet|tablets|tab|tabs|capsule|capsules|cap|caps)\b/i);
+  return match?.[0]?.trim() ?? cleanupText(text);
+}
+
+function extractName(text: string): string | null {
+  return cleanupText(text)
+    .replace(/\b(tablets?|capsules?|take|by mouth|directions?|rx|ndc)\b/gi, ' ')
+    .replace(/\b\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|units?)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractValue(text: string, mode: HighlightMode): string | null {
+  switch (mode) {
+    case 'ndc':
+      return extractNdc(text);
+    case 'rx':
+      return extractRx(text);
+    case 'amount':
+      return extractAmount(text);
+    case 'name':
+      return extractName(text);
+    case 'frequency':
+    case 'notes':
+      return cleanupText(text);
+    default:
+      return cleanupText(text);
+  }
 }
 
 /**
- * Lets the person drag a box around a number on the photo themselves, since
- * automatic detection of the highlighted area isn't reliable enough across
- * different phones/lighting. The selection point is offset above the finger
- * so the user can see what they're marking while dragging.
+ * Lets the person drag a box around one specific field on the photo. The
+ * selection point is offset above the finger so the box is visible while
+ * dragging, and the selected mode controls which form field gets updated.
  */
 export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCancel }: RxHighlightPickerProps) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -114,7 +156,7 @@ export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCanc
     const img = imgRef.current;
     const container = containerRef.current;
     if (!img || !container || !box || box.w < 8 || box.h < 8) {
-      setError(`Drag a box around the ${mode === 'ndc' ? 'NDC' : 'Rx number'} first.`);
+      setError(`Drag a box around the ${LABELS[mode]} first.`);
       return;
     }
     setError(null);
@@ -140,12 +182,13 @@ export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCanc
       if (!blob) throw new Error('crop failed');
 
       const result = await recognize(blob, 'eng');
-      const number = extractNumber(result.data.text, mode);
-      if (!number) {
-        setError(`Couldn't read a ${mode === 'ndc' ? 'valid NDC' : 'number'} in that area. Include the ${mode === 'ndc' ? 'NDC' : 'Rx'} label if it is nearby, or try selecting more tightly around the digits.`);
+      const rawText = cleanupText(result.data.text);
+      const value = extractValue(rawText, mode);
+      if (!value) {
+        setError(`Couldn't read the ${LABELS[mode]} in that area. Try selecting more tightly around the field text.`);
         return;
       }
-      onResult(number);
+      onResult(value, rawText);
     } catch {
       setError('Reading that selection failed. Try again.');
     } finally {
@@ -153,13 +196,12 @@ export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCanc
     }
   }
 
-  const label = mode === 'ndc' ? 'NDC' : 'Rx number';
+  const label = LABELS[mode];
 
   return (
     <div className="rx-picker">
       <p className="rx-picker-hint">
-        Drag the box around the {label}. Include the printed {mode === 'ndc' ? 'NDC' : 'Rx'} label if it is close by.
-        The selection appears about an inch above your finger so you can see it.
+        Highlight the {label}. The selection appears about an inch above your finger so you can see it.
       </p>
       {imageUrl && (
         <div
@@ -171,21 +213,16 @@ export default function RxHighlightPicker({ image, mode = 'rx', onResult, onCanc
           onPointerCancel={handlePointerUp}
         >
           <img ref={imgRef} src={imageUrl} alt="Scanned label" draggable={false} />
-          {box && (
-            <div
-              className="rx-picker-box"
-              style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
-            />
-          )}
+          {box && <div className="rx-picker-box" style={{ left: box.x, top: box.y, width: box.w, height: box.h }} />}
         </div>
       )}
       {error && <p className="login-error">{error}</p>}
       <div className="form-actions">
         <button type="button" className="secondary-button" onClick={onCancel} disabled={reading}>
-          Cancel
+          Back to field choices
         </button>
         <button type="button" className="primary-button" onClick={() => void handleReadSelection()} disabled={reading}>
-          {reading ? 'Reading…' : `Read ${label}`}
+          {reading ? 'Reading…' : `Use as ${label}`}
         </button>
       </div>
     </div>
