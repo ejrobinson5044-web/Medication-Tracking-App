@@ -43,6 +43,15 @@ function cleanedLines(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function cleanupRxCandidate(text: string): string {
+  return normalizeNdcOcr(text)
+    .replace(/[^\d\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+    .trim();
+}
+
 function addField<T extends string | TimeOfDay[]>(
   fields: ScanInferenceResult['fields'],
   key: InferredFieldName,
@@ -127,7 +136,7 @@ function addStructuredKeyValueFields(normalized: string, fields: ScanInferenceRe
     if (/^(ndc|nationaldrugcode|drugndc|packagendc)$/.test(key)) {
       addField(fields, 'ndc', normalizeNdcOcr(value).replace(/\s+/g, '-'), 98, `Barcode/QR key ${match[1]} identified this as NDC`);
     } else if (/^(rx|rxnumber|rxnum|rxno|prescription|prescriptionnumber|script|scriptnumber)$/.test(key)) {
-      addField(fields, 'rxNumber', ndcDigits(value), 96, `Barcode/QR key ${match[1]} identified this as Rx number`);
+      addField(fields, 'rxNumber', cleanupRxCandidate(value), 96, `Barcode/QR key ${match[1]} identified this as Rx number`);
     } else if (/^(drug|drugname|med|medication|medicationname|name)$/.test(key)) {
       addField(fields, 'name', titleCase(value), 90, `Barcode/QR key ${match[1]} identified this as medication name`);
     } else if (/^(dose|strength|amount)$/.test(key)) {
@@ -159,7 +168,7 @@ export function inferMedicationFromScanText(textParts: string[]): ScanInferenceR
 
   const rxMatch = normalized.match(RX_LABELED_PATTERN);
   if (rxMatch) {
-    addField(fields, 'rxNumber', ndcDigits(rxMatch[1]), 94, 'Number was printed next to Rx label');
+    addField(fields, 'rxNumber', cleanupRxCandidate(rxMatch[1]), 94, 'Number was printed next to Rx label');
   }
 
   const doseMatch = normalized.match(DOSE_PATTERN);
