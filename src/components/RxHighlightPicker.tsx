@@ -40,6 +40,15 @@ function cleanupText(text: string): string {
     .trim();
 }
 
+function cleanupRxCandidate(text: string): string {
+  return text
+    .replace(/[^\d\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+    .trim();
+}
+
 function extractNdc(text: string): string | null {
   const normalized = normalizeOcrNumberText(text);
   const labeled = normalized.match(/\bN[D0O][C0O][:\s#-]*([\d\s-]{10,16})\b/i);
@@ -59,9 +68,9 @@ function extractRx(text: string): string | null {
   const labeled = normalized.match(/\b(?:R\s?X|PRESCRIPTION)\s*(?:#|NO\.?|NUMBER|NUM)?\s*[:#-]?\s*([\d\s-]{4,16})\b/i);
   const candidates = labeled ? [labeled[1]] : normalized.match(/[\d\s-]{4,16}/g) ?? [];
   const plausible = candidates
-    .map((candidate) => ndcDigits(candidate))
-    .filter((candidate) => candidate.length >= 4)
-    .sort((a, b) => b.length - a.length);
+    .map((candidate) => cleanupRxCandidate(candidate))
+    .filter((candidate) => ndcDigits(candidate).length >= 4)
+    .sort((a, b) => ndcDigits(b).length - ndcDigits(a).length);
   return plausible[0] ?? null;
 }
 
