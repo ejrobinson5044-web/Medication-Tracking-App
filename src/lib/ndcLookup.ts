@@ -3,6 +3,8 @@ import { getNdcCandidates, ndcDigits } from './ndc';
 interface OpenFdaNdcResult {
   generic_name?: string;
   brand_name?: string;
+  product_ndc?: string;
+  packaging?: Array<{ package_ndc?: string }>;
   active_ingredients?: Array<{ name?: string; strength?: string }>;
 }
 
@@ -18,6 +20,7 @@ export interface NdcLookupResult {
 }
 
 const cache = new Map<string, NdcLookupResult[]>();
+const nameCache = new Map<string, NdcLookupResult[]>();
 
 // openFDA reports strength as "<amount> <unit>/<denominator>" (e.g. "80 mg/1");
 // the denominator is only meaningful for liquids/concentrations, so drop a
@@ -34,6 +37,10 @@ function titleCase(text: string): string {
     .join(' ');
 }
 
+function quoteForOpenFda(value: string): string {
+  return value.replace(/"/g, '').trim();
+}
+
 async function fetchByField(field: 'packaging.package_ndc' | 'product_ndc', value: string): Promise<OpenFdaNdcResult[]> {
   const res = await fetch(
     `https://api.fda.gov/drug/ndc.json?search=${field}:"${encodeURIComponent(value)}"&limit=10`,
@@ -41,6 +48,22 @@ async function fetchByField(field: 'packaging.package_ndc' | 'product_ndc', valu
   if (!res.ok) return [];
   const data: OpenFdaNdcResponse = await res.json();
   return data.results ?? [];
+}
+
+async function fetchByNameField(field: 'generic_name' | 'brand_name' | 'active_ingredients.name', value: string): Promise<OpenFdaNdcResult[]> {
+  const cleaned = quoteForOpenFda(value);
+  if (!cleaned) return [];
+
+  const res = await fetch(
+    `https://api.fda.gov/drug/ndc.json?search=${field}:"${encodeURIComponent(cleaned)}"&limit=25`,
+  );
+  if (!res.ok) return [];
+  const data: OpenFdaNdcResponse = await res.json();
+  return data.results ?? [];
+}
+
+function bestNdcFromResult(result: OpenFdaNdcResult): string | null {
+  return result.packaging?.find((pkg) => pkg.package_ndc)?.package_ndc ?? result.product_ndc ?? null;
 }
 
 function toLookupResult(ndc: string, result: OpenFdaNdcResult): NdcLookupResult | null {
@@ -58,6 +81,21 @@ function toLookupResult(ndc: string, result: OpenFdaNdcResult): NdcLookupResult 
   };
 }
 
+function dedupeResults(results: NdcLookupResult[]): NdcLookupResult[] {
+  const seen = new Set<string>();
+  const deduped: NdcLookupResult[] = [];
+
+  for (const result of results) {
+    const key = `${result.ndc}|${result.name}|${result.brandOrCommonName ?? ''}|${result.amount ?? ''}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(result);
+    }
+  }
+
+  return deduped;
+}
+
 /**
  * The NDC (National Drug Code) is a real, standardized identifier — unlike
  * the pharmacy-internal Rx# — so openFDA's free public NDC directory can
@@ -73,7 +111,6 @@ export async function lookupNdcCandidates(rawNdc: string): Promise<NdcLookupResu
   try {
     const ndcCandidates = getNdcCandidates(rawNdc);
     const matches: NdcLookupResult[] = [];
-    const seen = new Set<string>();
 
     for (const ndc of ndcCandidates) {
       // Labels print the full package NDC (e.g. 00074-3368-13); openFDA also
@@ -89,20 +126,50 @@ export async function lookupNdcCandidates(rawNdc: string): Promise<NdcLookupResu
 
       for (const result of results) {
         const looked = toLookupResult(ndc, result);
-        if (!looked) continue;
-
-        const dedupeKey = `${looked.ndc}|${looked.name}|${looked.brandOrCommonName ?? ''}|${looked.amount ?? ''}`;
-        if (!seen.has(dedupeKey)) {
-          seen.add(dedupeKey);
-          matches.push(looked);
-        }
+        if (looked) matches.push(looked);
       }
     }
 
-    cache.set(cacheKey, matches);
-    return matches;
+    const deduped = dedupeResults(matches);
+    cache.set(cacheKey, deduped);
+    return deduped;
   } catch {
     cache.set(cacheKey, []);
+    return [];
+  }
+}
+
+/**
+ * Resolves a selected medication name back to openFDA NDC candidates. RxNorm
+ * suggestions do not carry NDCs, so this does a second public-directory lookup
+ * by generic/brand/ingredient name after the user chooses a dropdown option.
+ */
+export async function lookupNdcCandidatesByName(name: string): Promise<NdcLookupResult[]> {
+  const cacheKey = name.trim().toLowerCase();
+  if (cacheKey.length < 2) return [];
+
+  const cached = nameCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const results = [
+      ...(await fetchByNameField('generic_name', name)),
+      ...(await fetchByNameField('brand_name', name)),
+      ...(await fetchByNameField('active_ingredients.name', name)),
+    ];
+
+    const mapped = results
+      .map((result) => {
+        const ndc = bestNdcFromResult(result);
+        return ndc ? toLookupResult(ndc, result) : null;
+      })
+      .filter((result): result is NdcLookupResult => Boolean(result));
+
+    const deduped = dedupeResults(mapped).slice(0, 12);
+    nameCache.set(cacheKey, deduped);
+    return deduped;
+  } catch {
+    nameCache.set(cacheKey, []);
     return [];
   }
 }
