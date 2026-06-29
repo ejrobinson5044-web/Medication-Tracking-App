@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuid } from 'uuid';
 import { medicationsStore, rxLookupStore } from '../lib/db';
 import { recognizeLabelText } from '../lib/ocr';
-import { lookupNdcCandidates, type NdcLookupResult } from '../lib/ndcLookup';
+import { lookupNdcCandidates, lookupNdcCandidatesByName, type NdcLookupResult } from '../lib/ndcLookup';
 import { searchDrugNames, parseDrugDisplayName } from '../lib/drugSearch';
 import { readBarcodeTexts } from '../lib/barcode';
 import { ndcDigits } from '../lib/ndc';
@@ -37,10 +37,22 @@ function levenshtein(a: string, b: string): number {
   return dp[a.length][b.length];
 }
 
-function findRxCandidates(digits: string, entries: RxLookupEntry[]): RxLookupEntry[] {
+function normalizeRxKey(value: string): string {
+  return ndcDigits(value);
+}
+
+function cleanRxInput(value: string): string {
+  return value.replace(/[^\d-]/g, '').replace(/-{2,}/g, '-');
+}
+
+function findRxCandidates(rxNumber: string, entries: RxLookupEntry[]): RxLookupEntry[] {
+  const rxKey = normalizeRxKey(rxNumber);
   return entries
-    .map((entry) => ({ entry, distance: levenshtein(digits, entry.rxNumber) }))
-    .filter(({ entry, distance }) => distance <= 2 || entry.rxNumber.includes(digits) || digits.includes(entry.rxNumber))
+    .map((entry) => {
+      const entryKey = normalizeRxKey(entry.rxNumber);
+      return { entry, entryKey, distance: levenshtein(rxKey, entryKey) };
+    })
+    .filter(({ entryKey, distance }) => distance <= 2 || entryKey.includes(rxKey) || rxKey.includes(entryKey))
     .sort((a, b) => a.distance - b.distance)
     .slice(0, 5)
     .map(({ entry }) => entry);
@@ -159,11 +171,26 @@ export default function MedFormPage() {
     setExtractedRxNumber(null);
   }
 
-  function selectNameSuggestion(raw: string) {
+  async function selectNameSuggestion(raw: string) {
     suppressNextLookup.current = true;
     const parsed = parseDrugDisplayName(raw);
     setForm((prev) => ({ ...prev, name: parsed.name, brandOrCommonName: prev.brandOrCommonName || parsed.brandOrCommonName || prev.brandOrCommonName, amount: prev.amount || parsed.amount || prev.amount }));
     setShowSuggestions(false);
+
+    setNdcLooking(true);
+    try {
+      const results = await lookupNdcCandidatesByName(parsed.name);
+      if (results.length === 1) {
+        applyNdcMatch(results[0]);
+      } else if (results.length > 1) {
+        setNdcCandidates(results);
+        setScanInfo(`Found ${results.length} possible NDCs for ${parsed.name}. Pick the matching one below.`);
+      } else {
+        setScanInfo(`Selected ${parsed.name}. No public NDC match was found automatically.`);
+      }
+    } finally {
+      setNdcLooking(false);
+    }
   }
 
   async function applyNdcLookup(ndc: string) {
@@ -227,9 +254,9 @@ export default function MedFormPage() {
         await applyNdcLookup(value);
         break;
       case 'rx':
-        setForm((prev) => ({ ...prev, rxNumber: value }));
-        setScanInfo(`Placed highlighted text into Rx #: ${value}.`);
-        await handleRxHighlightResult(value);
+        setForm((prev) => ({ ...prev, rxNumber: cleanRxInput(value) }));
+        setScanInfo(`Placed highlighted text into Rx #: ${cleanRxInput(value)}.`);
+        await handleRxHighlightResult(cleanRxInput(value));
         break;
       case 'name':
         setForm((prev) => ({ ...prev, name: value }));
@@ -392,14 +419,25 @@ export default function MedFormPage() {
     }
   }
 
-  async function handleRxHighlightResult(digits: string) {
-    setExtractedRxNumber(digits);
-    const known = await rxLookupStore.get(digits);
-    if (known) {
-      applyRxMatch(known);
+  async function handleRxHighlightResult(rxNumber: string) {
+    const cleaned = cleanRxInput(rxNumber);
+    const rxKey = normalizeRxKey(cleaned);
+    setExtractedRxNumber(cleaned);
+
+    const exact = await rxLookupStore.get(cleaned);
+    if (exact) {
+      applyRxMatch(exact);
       return;
     }
-    const candidates = findRxCandidates(digits, await rxLookupStore.getAll());
+
+    const allEntries = await rxLookupStore.getAll();
+    const normalizedExact = allEntries.find((entry) => normalizeRxKey(entry.rxNumber) === rxKey);
+    if (normalizedExact) {
+      applyRxMatch(normalizedExact);
+      return;
+    }
+
+    const candidates = findRxCandidates(cleaned, allEntries);
     if (candidates.length > 0) setRxCandidates(candidates);
   }
 
@@ -452,16 +490,16 @@ export default function MedFormPage() {
         {scanning && <p className="login-info">Reading…</p>}
         {scanError && <p className="login-error">{scanError}</p>}
         {scanInfo && <p className="login-info">{scanInfo}</p>}
-        {ndcCandidates.length > 0 && <div className="rx-picker"><p className="rx-picker-hint">Multiple medications matched that NDC pattern:</p><ul className="rx-candidate-list">{ndcCandidates.map((candidate) => <li key={`${candidate.ndc}-${candidate.name}-${candidate.amount ?? ''}`}><button type="button" onClick={() => applyNdcMatch(candidate)}>{candidate.name}<span className="rx-candidate-meta">NDC {candidate.ndc}{candidate.brandOrCommonName ? ` • ${candidate.brandOrCommonName}` : ''}{candidate.amount ? ` • ${candidate.amount}` : ''}</span></button></li>)}</ul></div>}
+        {ndcCandidates.length > 0 && <div className="rx-picker"><p className="rx-picker-hint">Multiple NDC matches found:</p><ul className="rx-candidate-list">{ndcCandidates.map((candidate) => <li key={`${candidate.ndc}-${candidate.name}-${candidate.amount ?? ''}`}><button type="button" onClick={() => applyNdcMatch(candidate)}>{candidate.name}<span className="rx-candidate-meta">NDC {candidate.ndc}{candidate.brandOrCommonName ? ` • ${candidate.brandOrCommonName}` : ''}{candidate.amount ? ` • ${candidate.amount}` : ''}</span></button></li>)}</ul></div>}
         {pendingImage && !highlightMode && <div className="rx-picker"><p className="rx-picker-hint">Use this same photo to manually place fields. Pick a field, highlight it, then repeat for the next field.</p><div className="form-actions"><button type="button" className="secondary-button" onClick={() => setHighlightMode('ndc')}>NDC Number</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('rx')}>Rx Number</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('name')}>Medication Name</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('amount')}>Dose / Amount</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('frequency')}>Directions / Frequency</button><button type="button" className="secondary-button" onClick={() => setHighlightMode('notes')}>Notes</button><button type="button" className="secondary-button" onClick={cancelScan}>Close photo</button></div></div>}
         {pendingImage && highlightMode && <RxHighlightPicker image={pendingImage} mode={highlightMode} onResult={(value, rawText) => void handleFieldHighlightResult(highlightMode, value, rawText)} onCancel={() => setHighlightMode(null)} />}
         {rxCandidates.length > 0 && <div className="rx-picker"><p className="rx-picker-hint">Read “{extractedRxNumber}” — which prescription is this?</p><ul className="rx-candidate-list">{rxCandidates.map((c) => <li key={c.rxNumber}><button type="button" onClick={() => applyRxMatch(c)}>{c.name}<span className="rx-candidate-meta">Rx# {c.rxNumber}</span></button></li>)}</ul><div className="form-actions"><button type="button" className="secondary-button" onClick={handleNoCandidateMatch}>None of these — new prescription</button></div></div>}
       </div>
       <form className="med-form" onSubmit={handleSubmit}>
         <label>NDC (National Drug Code)<input value={form.ndc} onChange={(e) => setForm({ ...form, ndc: e.target.value })} onBlur={handleNdcBlur} placeholder="e.g. 00074-3368-13 or 00074336813" />{ndcLooking && <span className="login-info">Looking up…</span>}</label>
-        <label className="name-field">Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} onFocus={() => setShowSuggestions(nameSuggestions.length > 0)} onBlur={() => setTimeout(() => setShowSuggestions(false), 100)} placeholder="e.g. Lisinopril" autoComplete="off" />{showSuggestions && <ul className="suggestion-list">{nameSuggestions.map((suggestion) => <li key={suggestion}><button type="button" onMouseDown={() => selectNameSuggestion(suggestion)}>{suggestion}</button></li>)}</ul>}</label>
+        <label className="name-field">Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} onFocus={() => setShowSuggestions(nameSuggestions.length > 0)} onBlur={() => setTimeout(() => setShowSuggestions(false), 100)} placeholder="e.g. Lisinopril" autoComplete="off" />{showSuggestions && <ul className="suggestion-list">{nameSuggestions.map((suggestion) => <li key={suggestion}><button type="button" onMouseDown={() => void selectNameSuggestion(suggestion)}>{suggestion}</button></li>)}</ul>}</label>
         <label>Brand / common name<input value={form.brandOrCommonName} onChange={(e) => setForm({ ...form, brandOrCommonName: e.target.value })} placeholder="e.g. Prinivil (optional)" /></label>
-        <label>Rx # (prescription number)<input value={form.rxNumber} onChange={(e) => setForm({ ...form, rxNumber: ndcDigits(e.target.value) })} placeholder="e.g. 1234567" /></label>
+        <label>Rx # (prescription number)<input value={form.rxNumber} onChange={(e) => setForm({ ...form, rxNumber: cleanRxInput(e.target.value) })} placeholder="e.g. 123-4567 or 1234567" /></label>
         <label>Amount / dose<input required value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="e.g. 10mg, 1 tablet" /></label>
         <fieldset className="time-of-day-picker"><div className="time-of-day-header"><legend>Time(s) of day</legend><span className="rx-candidate-meta">Frequency fills from this</span></div>{TIMES_OF_DAY.map((tod) => <label key={tod} className="checkbox-pill"><input type="checkbox" checked={form.timesOfDay.includes(tod)} onChange={() => toggleTime(tod)} />{TIME_OF_DAY_LABELS[tod]}</label>)}</fieldset>
         <label>Frequency<input required value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} placeholder="e.g. Twice daily or As needed" /></label>
